@@ -73,6 +73,22 @@ LANG_RULE = (
     "If unsure, match the language of the user's last message.\n"
 )
 
+# Wolof quality guide injected into prompts that may generate Wolof
+WOLOF_GUIDE = (
+    "\n\n## WOLOF LANGUAGE QUALITY GUIDE:\n"
+    "When writing in Wolof, follow these rules for natural, spoken Senegalese Wolof:\n"
+    "- Use common spoken Wolof as used daily in Dakar and across Senegal — NOT literary or archaic Wolof.\n"
+    "- Basic greetings: 'Nanga def?' (How are you?), 'Mangi fi rekk' (I'm fine), 'Jërejëf' (Thank you), 'Waaw' (Yes), 'Déedéet' (No).\n"
+    "- Common verbs: 'bëgg' (want), 'xam' (know), 'def' (do/make), 'dem' (go), 'ñów' (come), 'lekk' (eat), 'bind' (write), 'jàng' (read/study), 'liggéey' (work).\n"
+    "- Sentence structure: Subject + Verb marker + Verb + Object. Example: 'Maa ngi liggéey' (I am working).\n"
+    "- Use verb markers correctly: 'dama' (I do), 'danga' (you do), 'dafa' (he/she does), 'dañu' (we/they do).\n"
+    "- Pronouns: 'man' (I/me), 'yow' (you), 'moom' (he/she), 'nun' (we), 'yeen' (you pl.), 'ñoom' (they).\n"
+    "- Keep sentences short and clear — Wolof is a direct language.\n"
+    "- When a concept has no Wolof word, use the common French loanword that Senegalese people actually use (e.g., 'ordinateur', 'travail', 'business').\n"
+    "- Avoid inventing Wolof words. If unsure, use French loanword + Wolof sentence structure.\n"
+    "- Common useful phrases: 'Li ci gëna am solo' (The most important thing), 'Ndax mën nga...' (Can you...), 'Jël sa waxtu' (Take your time).\n"
+)
+
 SYSTEM_PROMPTS = {
     "chat": (
         "You are LAILA AI — Africa Smart Assistant.\n"
@@ -97,7 +113,7 @@ SYSTEM_PROMPTS = {
         "- Translating between Wolof, French, English, and Italian\n"
         "- Writing messages, social media posts, emails\n"
         "- Daily life questions: health tips, cooking, technology, finance\n"
-        + LANG_RULE
+        + LANG_RULE + WOLOF_GUIDE
     ),
     "work": (
         "You are LAILA AI — Africa Smart Assistant, specialized in WORK and CAREER.\n\n"
@@ -149,7 +165,7 @@ SYSTEM_PROMPTS = {
         "- Be practical and specific — mention real tools, platforms, and amounts.\n"
         "- Give ideas that work with 5,000 FCFA, 10,000 FCFA, or 50,000 FCFA — not just big investments.\n"
         "- Be motivating but honest: mention risks and how to handle them.\n"
-        + LANG_RULE
+        + LANG_RULE + WOLOF_GUIDE
     ),
     "content": (
         "You are LAILA AI — Africa Smart Assistant, specialized in CONTENT CREATION.\n\n"
@@ -166,7 +182,7 @@ SYSTEM_PROMPTS = {
         "- Be creative and energetic in social content, professional in business messages.\n"
         "- Use culturally relevant references, slang, and trends when appropriate.\n"
         "- Always provide ready-to-use text — not just suggestions.\n"
-        + LANG_RULE
+        + LANG_RULE + WOLOF_GUIDE
     ),
     "translate": (
         "You are LAILA AI — Africa Smart Assistant, specialized in TRANSLATION.\n\n"
