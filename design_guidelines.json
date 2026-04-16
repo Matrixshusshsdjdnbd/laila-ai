@@ -1,0 +1,78 @@
+{
+  "project_name": "LAILA AI - Africa Smart Assistant",
+  "theme_overview": {
+    "archetype": "Archetype 5 (Jewel & Luxury) mixed with Archetype 4 (Utility)",
+    "theme_mode": "dark",
+    "rationale": "Deep obsidian dark mode acts as an energy-efficient, high-contrast canvas for mobile screens. Gold/Amber accents add warmth, evoking African heritage and premium AI intelligence without being garish. Large touch targets ensure accessibility."
+  },
+  "color_system": {
+    "background": "#0A0908",
+    "card": "#141311",
+    "primary": "#FFC107",
+    "primary_foreground": "#422006",
+    "secondary": "#211F1C",
+    "secondary_foreground": "#FDE68A",
+    "muted": "#27272A",
+    "muted_foreground": "#A1A1AA",
+    "border": "#27272A",
+    "ai_bubble_bg": "linear-gradient(135deg, rgba(255, 193, 7, 0.15), rgba(217, 119, 6, 0.05))",
+    "ai_bubble_border": "rgba(255, 193, 7, 0.2)"
+  },
+  "typography": {
+    "font_family": {
+      "heading": "Outfit, sans-serif",
+      "body": "DM Sans, sans-serif"
+    },
+    "hierarchy": {
+      "h1": "text-4xl font-bold tracking-tight text-white",
+      "h2": "text-2xl font-semibold tracking-tight text-white",
+      "h3": "text-xl font-medium text-white",
+      "body": "text-base font-normal text-zinc-300 leading-relaxed",
+      "caption": "text-sm font-medium text-zinc-500 tracking-wide uppercase"
+    }
+  },
+  "spacing_and_layout": {
+    "container": "w-full max-w-md mx-auto h-[100dvh] flex flex-col bg-[#0A0908] overflow-hidden relative",
+    "touch_targets": "Minimum 48px height for all interactive elements (h-12 to h-16).",
+    "padding": "Generous mobile padding: px-6 py-8",
+    "safe_area": "pb-24 (to clear bottom nav)"
+  },
+  "components_instructions": {
+    "BottomNavigation": "Fixed to bottom, glassmorphism effect (backdrop-blur-xl bg-[#0A0908]/80 border-t border-zinc-800). 4 equal tabs. Active tab icon turns Gold (#FFC107) with a subtle dot indicator below.",
+    "QuickActionGrid": "Bento-style grid (grid-cols-2 gap-4). Cards use bg-card, rounded-2xl, border border-border/50. Hover/Active state adds a subtle amber inner glow.",
+    "AIChatBubble": "Border-radius rounded-2xl rounded-tl-sm. Uses ai_bubble_bg and ai_bubble_border. Text is off-white.",
+    "UserChatBubble": "Border-radius rounded-2xl rounded-tr-sm. bg-zinc-800 text-white.",
+    "InputArea": "Fixed above bottom nav. Uses Shadcn Input but rounded-full h-14 bg-zinc-900 border-zinc-700. Send button is a Gold circle with dark icon.",
+    "LanguageSelector": "Shadcn Dropdown or segmented control customized with dark styling and gold active states."
+  },
+  "motion_and_interactions": {
+    "tap_feedback": "All buttons scale down to 0.95 on active (Tailwind: active:scale-95 transition-transform).",
+    "transitions": "Page transitions use Framer Motion slide-in or simple opacity fades."
+  },
+  "icons": {
+    "library": "lucide-react",
+    "stroke_width": "2",
+    "size": "w-6 h-6 for nav, w-8 h-8 for quick actions"
+  },
+  "media_assets": {
+    "laila_avatar": {
+      "url": "https://static.prod-images.emergentagent.com/jobs/77519848-9b4a-4910-aa07-2f02e79a7b5d/images/1a681c81eff92c5b0c35d02ab311d5ea865233cb947e19c22ce8fca398f91059.png",
+      "description": "3D Gold AI Avatar for Laila, use in chat header and splash screen."
+    },
+    "background_texture": {
+      "url": "https://static.prod-images.emergentagent.com/jobs/77519848-9b4a-4910-aa07-2f02e79a7b5d/images/2e09453c6bfeebf2215761de66a262840138012191141edd62166af8b5798d62.png",
+      "description": "Subtle dark gold background mesh. Use as absolute positioned background with opacity-20 behind the main chat/home screens."
+    },
+    "entrepreneur_card": {
+      "url": "https://images.unsplash.com/photo-1758874385393-3ef15b394a86?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Nzd8MHwxfHNlYXJjaHwxfHxhZnJpY2FuJTIwZW50cmVwcmVuZXVyJTIwd29ya2luZ3xlbnwwfHx8fDE3NzYzMjQ4OTl8MA&ixlib=rb-4.1.0&q=85",
+      "description": "African entrepreneur working. Use for 'Work & Money' / CV Builder section card header."
+    },
+    "student_card": {
+      "url": "https://images.unsplash.com/photo-1744809482817-9a9d4fc280af?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1MDZ8MHwxfHNlYXJjaHwxfHxhZnJpY2FuJTIwc3R1ZGVudCUyMHN0dWR5aW5nfGVufDB8fHx8MTc3NjMyNDg5OXww&ixlib=rb-4.1.0&q=85",
+      "description": "African teacher/students in class. Use for 'Study & Homework' section card header."
+    }
+  },
+  "testing": {
+    "attributes": "Add data-testid to all interactable elements (e.g., data-testid='bottom-nav-chat', data-testid='send-message-btn')."
+  }
+}
