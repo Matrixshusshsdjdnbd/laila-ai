@@ -55,6 +55,7 @@ A powerful AI assistant app designed to help people in Africa in daily life - wo
 | POST | /api/chat | AI chat |
 | POST | /api/translate | Translation |
 | POST | /api/generate | Content generation |
+| POST | /api/transcribe | Voice-to-text (Whisper) |
 | GET | /api/conversations | List conversations |
 | GET | /api/conversations/{id}/messages | Get messages |
 | DELETE | /api/conversations/{id} | Delete conversation |
