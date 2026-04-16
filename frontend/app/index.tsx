@@ -56,8 +56,11 @@ export default function ChatScreen() {
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
+  const [playingId, setPlayingId] = useState<string | null>(null);
+  const [loadingTtsId, setLoadingTtsId] = useState<string | null>(null);
   const flatListRef = useRef<FlatList>(null);
   const recordingRef = useRef<Audio.Recording | null>(null);
+  const soundRef = useRef<Audio.Sound | null>(null);
   const durationInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const sendMessage = useCallback(async (text?: string, chatMode?: string) => {
@@ -90,7 +93,6 @@ export default function ChatScreen() {
 
       if (!res.ok) throw new Error('Failed to get response');
       const data = await res.json();
-      
       setConversationId(data.conversation_id);
       setMessages(prev => [...prev, data.message]);
     } catch (err) {
@@ -105,63 +107,101 @@ export default function ChatScreen() {
     }
   }, [input, loading, conversationId, mode]);
 
+  // ─── TTS Playback ─────────────────────────────────────
+  const playTTS = async (messageId: string, text: string) => {
+    try {
+      // If already playing this message, stop it
+      if (playingId === messageId) {
+        await stopPlayback();
+        return;
+      }
+
+      // Stop any current playback
+      await stopPlayback();
+
+      setLoadingTtsId(messageId);
+
+      const res = await fetch(`${BACKEND_URL}/api/tts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text.substring(0, 4096), voice: 'nova' }),
+      });
+
+      if (!res.ok) throw new Error('TTS failed');
+      const data = await res.json();
+
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+      });
+
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: `data:audio/mp3;base64,${data.audio}` },
+        { shouldPlay: true }
+      );
+
+      soundRef.current = sound;
+      setPlayingId(messageId);
+      setLoadingTtsId(null);
+
+      sound.setOnPlaybackStatusUpdate((status) => {
+        if (status.isLoaded && status.didJustFinish) {
+          setPlayingId(null);
+          sound.unloadAsync();
+          soundRef.current = null;
+        }
+      });
+    } catch (err) {
+      console.error('TTS error:', err);
+      setLoadingTtsId(null);
+      setPlayingId(null);
+    }
+  };
+
+  const stopPlayback = async () => {
+    if (soundRef.current) {
+      try {
+        await soundRef.current.stopAsync();
+        await soundRef.current.unloadAsync();
+      } catch {}
+      soundRef.current = null;
+    }
+    setPlayingId(null);
+  };
+
   // ─── Voice Recording ──────────────────────────────────
   const startRecording = async () => {
     try {
+      await stopPlayback();
       const permission = await Audio.requestPermissionsAsync();
       if (!permission.granted) {
         Alert.alert('Permission needed', 'Please allow microphone access to use voice input.');
         return;
       }
-
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true,
-      });
-
-      const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY
-      );
-      
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
       recordingRef.current = recording;
       setIsRecording(true);
       setRecordingDuration(0);
-
-      durationInterval.current = setInterval(() => {
-        setRecordingDuration(prev => prev + 1);
-      }, 1000);
+      durationInterval.current = setInterval(() => setRecordingDuration(prev => prev + 1), 1000);
     } catch (err) {
-      console.error('Failed to start recording:', err);
-      Alert.alert('Error', 'Could not start recording. Please check microphone permissions.');
+      Alert.alert('Error', 'Could not start recording.');
     }
   };
 
   const stopRecording = async () => {
     if (!recordingRef.current) return;
-
     try {
       setIsRecording(false);
-      if (durationInterval.current) {
-        clearInterval(durationInterval.current);
-        durationInterval.current = null;
-      }
-
+      if (durationInterval.current) { clearInterval(durationInterval.current); durationInterval.current = null; }
       await recordingRef.current.stopAndUnloadAsync();
       await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
-
       const uri = recordingRef.current.getURI();
       recordingRef.current = null;
-
-      if (!uri) {
-        Alert.alert('Error', 'No audio recorded.');
-        return;
-      }
-
-      // Transcribe
+      if (!uri) return;
       setIsTranscribing(true);
       await transcribeAudio(uri);
     } catch (err) {
-      console.error('Failed to stop recording:', err);
       setIsTranscribing(false);
     }
   };
@@ -169,57 +209,27 @@ export default function ChatScreen() {
   const transcribeAudio = async (uri: string) => {
     try {
       const formData = new FormData();
-      
-      // Determine the correct mime type and filename
-      const fileExtension = uri.split('.').pop() || 'm4a';
-      const mimeType = fileExtension === 'webm' ? 'audio/webm' : 
-                       fileExtension === 'wav' ? 'audio/wav' : 
-                       fileExtension === 'mp3' ? 'audio/mp3' : 'audio/m4a';
-      
-      formData.append('file', {
-        uri: uri,
-        type: mimeType,
-        name: `recording.${fileExtension}`,
-      } as any);
+      const ext = uri.split('.').pop() || 'm4a';
+      const mimeType = ext === 'webm' ? 'audio/webm' : ext === 'wav' ? 'audio/wav' : 'audio/m4a';
+      formData.append('file', { uri, type: mimeType, name: `recording.${ext}` } as any);
       formData.append('language', '');
-
-      const res = await fetch(`${BACKEND_URL}/api/transcribe`, {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || 'Transcription failed');
-      }
-
+      const res = await fetch(`${BACKEND_URL}/api/transcribe`, { method: 'POST', body: formData });
+      if (!res.ok) throw new Error('Transcription failed');
       const data = await res.json();
       if (data.text && data.text.trim()) {
         setInput(prev => prev ? prev + ' ' + data.text.trim() : data.text.trim());
       } else {
         Alert.alert('No speech detected', 'Please try speaking louder or closer to the microphone.');
       }
-    } catch (err: any) {
-      console.error('Transcription error:', err);
-      Alert.alert('Transcription failed', 'Could not convert speech to text. Please try again.');
+    } catch {
+      Alert.alert('Transcription failed', 'Could not convert speech to text.');
     } finally {
       setIsTranscribing(false);
     }
   };
 
-  const toggleRecording = () => {
-    if (isRecording) {
-      stopRecording();
-    } else {
-      startRecording();
-    }
-  };
-
-  const formatDuration = (secs: number) => {
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    return `${m}:${s.toString().padStart(2, '0')}`;
-  };
+  const toggleRecording = () => { isRecording ? stopRecording() : startRecording(); };
+  const formatDuration = (s: number) => `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
 
   const handleQuickAction = (actionId: string) => {
     const prompts: Record<string, string> = {
@@ -238,6 +248,7 @@ export default function ChatScreen() {
   };
 
   const startNewChat = () => {
+    stopPlayback();
     setMessages([]);
     setConversationId(null);
     setMode('chat');
@@ -245,19 +256,44 @@ export default function ChatScreen() {
 
   const renderMessage = ({ item }: { item: Message }) => {
     const isUser = item.role === 'user';
+    const isPlaying = playingId === item.id;
+    const isTtsLoading = loadingTtsId === item.id;
+
     return (
-      <View
-        testID={`message-${item.id}`}
-        style={[styles.msgRow, isUser ? styles.msgRowUser : styles.msgRowAi]}
-      >
+      <View testID={`message-${item.id}`} style={[styles.msgRow, isUser ? styles.msgRowUser : styles.msgRowAi]}>
         {!isUser && (
           <View style={styles.avatarSmall}>
             <Text style={styles.avatarText}>L</Text>
           </View>
         )}
-        <View style={[styles.bubble, isUser ? styles.userBubble : styles.aiBubble]}>
-          {!isUser && <Text style={styles.aiLabel}>LAILA</Text>}
-          <Text style={[styles.msgText, isUser && styles.userMsgText]}>{item.content}</Text>
+        <View style={{ maxWidth: '100%' }}>
+          <View style={[styles.bubble, isUser ? styles.userBubble : styles.aiBubble]}>
+            {!isUser && <Text style={styles.aiLabel}>LAILA</Text>}
+            <Text style={[styles.msgText, isUser && styles.userMsgText]}>{item.content}</Text>
+          </View>
+          {/* TTS Speaker Button - only for AI messages */}
+          {!isUser && (
+            <TouchableOpacity
+              testID={`tts-btn-${item.id}`}
+              style={[styles.ttsBtn, isPlaying && styles.ttsBtnPlaying]}
+              onPress={() => playTTS(item.id, item.content)}
+              disabled={isTtsLoading}
+              activeOpacity={0.7}
+            >
+              {isTtsLoading ? (
+                <ActivityIndicator size={14} color={COLORS.primary} />
+              ) : (
+                <Ionicons
+                  name={isPlaying ? 'stop-circle' : 'volume-medium'}
+                  size={16}
+                  color={isPlaying ? COLORS.recording : COLORS.primary}
+                />
+              )}
+              <Text style={[styles.ttsText, isPlaying && styles.ttsTextPlaying]}>
+                {isTtsLoading ? 'Loading...' : isPlaying ? 'Stop' : 'Listen'}
+              </Text>
+            </TouchableOpacity>
+          )}
         </View>
         {isUser && (
           <View style={styles.userAvatar}>
@@ -275,19 +311,12 @@ export default function ChatScreen() {
       </View>
       <Text style={styles.emptyTitle}>LAILA AI</Text>
       <Text style={styles.emptySubtitle}>Africa Smart Assistant</Text>
-      <Text style={styles.emptyDesc}>
-        Your AI assistant for work, study, business, and daily life in Africa.
-      </Text>
-
+      <Text style={styles.emptyDesc}>Your AI assistant for work, study, business, and daily life in Africa.</Text>
       <View style={styles.quickGrid}>
         {QUICK_ACTIONS.map((action) => (
-          <TouchableOpacity
-            key={action.id}
-            testID={`quick-action-${action.id}`}
+          <TouchableOpacity key={action.id} testID={`quick-action-${action.id}`}
             style={[styles.quickCard, { borderColor: action.color + '30' }]}
-            onPress={() => handleQuickAction(action.id)}
-            activeOpacity={0.7}
-          >
+            onPress={() => handleQuickAction(action.id)} activeOpacity={0.7}>
             <View style={[styles.quickIconWrap, { backgroundColor: action.color + '18' }]}>
               <Ionicons name={action.icon as any} size={22} color={action.color} />
             </View>
@@ -295,17 +324,11 @@ export default function ChatScreen() {
           </TouchableOpacity>
         ))}
       </View>
-
       <Text style={styles.presetTitle}>Quick start</Text>
       <View style={styles.presetList}>
         {PRESET_PROMPTS.map((preset, idx) => (
-          <TouchableOpacity
-            key={idx}
-            testID={`preset-${idx}`}
-            style={styles.presetChip}
-            onPress={() => handlePreset(preset)}
-            activeOpacity={0.7}
-          >
+          <TouchableOpacity key={idx} testID={`preset-${idx}`} style={styles.presetChip}
+            onPress={() => handlePreset(preset)} activeOpacity={0.7}>
             <Text style={styles.presetText}>{preset.label}</Text>
             <Ionicons name="arrow-forward" size={14} color={COLORS.primary} />
           </TouchableOpacity>
@@ -316,12 +339,9 @@ export default function ChatScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      {/* Header */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
-          <View style={styles.headerAvatar}>
-            <Text style={styles.headerAvatarText}>L</Text>
-          </View>
+          <View style={styles.headerAvatar}><Text style={styles.headerAvatarText}>L</Text></View>
           <View>
             <Text style={styles.headerTitle}>LAILA AI</Text>
             <View style={styles.statusRow}>
@@ -330,41 +350,24 @@ export default function ChatScreen() {
             </View>
           </View>
         </View>
-        <TouchableOpacity
-          testID="new-chat-btn"
-          onPress={startNewChat}
-          style={styles.newChatBtn}
-        >
+        <TouchableOpacity testID="new-chat-btn" onPress={startNewChat} style={styles.newChatBtn}>
           <Ionicons name="add-circle-outline" size={28} color={COLORS.primary} />
         </TouchableOpacity>
       </View>
 
-      <KeyboardAvoidingView
-        style={styles.flex1}
+      <KeyboardAvoidingView style={styles.flex1}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
-      >
-        <FlatList
-          ref={flatListRef}
-          data={messages}
-          renderItem={renderMessage}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}>
+        <FlatList ref={flatListRef} data={messages} renderItem={renderMessage}
           keyExtractor={(item) => item.id}
           contentContainerStyle={messages.length === 0 ? styles.emptyList : styles.msgList}
           ListEmptyComponent={renderEmpty}
-          onContentSizeChange={() => {
-            if (messages.length > 0) {
-              flatListRef.current?.scrollToEnd({ animated: true });
-            }
-          }}
-          showsVerticalScrollIndicator={false}
-        />
+          onContentSizeChange={() => { if (messages.length > 0) flatListRef.current?.scrollToEnd({ animated: true }); }}
+          showsVerticalScrollIndicator={false} />
 
-        {/* Loading indicator */}
         {loading && (
           <View style={styles.loadingRow}>
-            <View style={styles.avatarSmall}>
-              <Text style={styles.avatarText}>L</Text>
-            </View>
+            <View style={styles.avatarSmall}><Text style={styles.avatarText}>L</Text></View>
             <View style={styles.loadingBubble}>
               <ActivityIndicator size="small" color={COLORS.primary} />
               <Text style={styles.loadingText}>LAILA is thinking...</Text>
@@ -372,42 +375,27 @@ export default function ChatScreen() {
           </View>
         )}
 
-        {/* Inline preset chips */}
         {messages.length > 0 && !loading && (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.inlinePresets}
-          >
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.inlinePresets}>
             {PRESET_PROMPTS.map((preset, idx) => (
-              <TouchableOpacity
-                key={idx}
-                testID={`inline-preset-${idx}`}
-                style={styles.inlineChip}
-                onPress={() => handlePreset(preset)}
-              >
+              <TouchableOpacity key={idx} testID={`inline-preset-${idx}`} style={styles.inlineChip}
+                onPress={() => handlePreset(preset)}>
                 <Text style={styles.inlineChipText}>{preset.label}</Text>
               </TouchableOpacity>
             ))}
           </ScrollView>
         )}
 
-        {/* Recording indicator */}
         {isRecording && (
           <View style={styles.recordingBar}>
             <View style={styles.recordingDot} />
             <Text style={styles.recordingText}>Recording... {formatDuration(recordingDuration)}</Text>
-            <TouchableOpacity
-              testID="stop-recording-btn"
-              onPress={stopRecording}
-              style={styles.stopRecBtn}
-            >
+            <TouchableOpacity testID="stop-recording-btn" onPress={stopRecording} style={styles.stopRecBtn}>
               <Text style={styles.stopRecText}>Stop</Text>
             </TouchableOpacity>
           </View>
         )}
 
-        {/* Transcribing indicator */}
         {isTranscribing && (
           <View style={styles.transcribingBar}>
             <ActivityIndicator size="small" color={COLORS.primary} />
@@ -415,44 +403,22 @@ export default function ChatScreen() {
           </View>
         )}
 
-        {/* Input */}
         <View style={styles.inputContainer}>
-          <TextInput
-            testID="chat-input"
-            style={styles.input}
-            placeholder="Ask LAILA anything..."
-            placeholderTextColor={COLORS.mutedFg}
-            value={input}
-            onChangeText={setInput}
-            multiline
-            maxLength={2000}
-            returnKeyType="default"
-          />
-          
-          {/* Mic button - show when input is empty */}
+          <TextInput testID="chat-input" style={styles.input} placeholder="Ask LAILA anything..."
+            placeholderTextColor={COLORS.mutedFg} value={input} onChangeText={setInput}
+            multiline maxLength={2000} returnKeyType="default" />
           {!input.trim() && !loading && (
-            <TouchableOpacity
-              testID="mic-btn"
+            <TouchableOpacity testID="mic-btn"
               style={[styles.micBtn, isRecording && styles.micBtnRecording]}
-              onPress={toggleRecording}
-              disabled={isTranscribing}
-            >
-              <Ionicons
-                name={isRecording ? 'stop' : 'mic'}
-                size={22}
-                color={isRecording ? COLORS.white : COLORS.primary}
-              />
+              onPress={toggleRecording} disabled={isTranscribing}>
+              <Ionicons name={isRecording ? 'stop' : 'mic'} size={22}
+                color={isRecording ? COLORS.white : COLORS.primary} />
             </TouchableOpacity>
           )}
-
-          {/* Send button - show when input has text */}
           {(input.trim() || loading) && (
-            <TouchableOpacity
-              testID="send-message-btn"
+            <TouchableOpacity testID="send-message-btn"
               style={[styles.sendBtn, (!input.trim() || loading) && styles.sendBtnDisabled]}
-              onPress={() => sendMessage()}
-              disabled={!input.trim() || loading}
-            >
+              onPress={() => sendMessage()} disabled={!input.trim() || loading}>
               <Ionicons name="arrow-up" size={20} color={COLORS.primaryDark} />
             </TouchableOpacity>
           )}
@@ -463,375 +429,68 @@ export default function ChatScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.bg,
-  },
+  container: { flex: 1, backgroundColor: COLORS.bg },
   flex1: { flex: 1 },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingTop: Platform.OS === 'android' ? 44 : 12,
-    paddingBottom: 12,
-    borderBottomWidth: 0.5,
-    borderBottomColor: COLORS.muted,
-  },
-  headerLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  headerAvatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: COLORS.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  headerAvatarText: {
-    fontSize: 18,
-    fontWeight: '800',
-    color: COLORS.primaryDark,
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: COLORS.white,
-  },
-  statusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  statusDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#22C55E',
-  },
-  headerSub: {
-    fontSize: 12,
-    color: '#22C55E',
-  },
-  newChatBtn: {
-    padding: 8,
-  },
-  emptyList: {
-    flexGrow: 1,
-    justifyContent: 'center',
-  },
-  msgList: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    paddingBottom: 8,
-  },
-  emptyContainer: {
-    alignItems: 'center',
-    paddingHorizontal: 24,
-  },
-  logoCircle: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: COLORS.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 12,
-  },
-  logoText: {
-    fontSize: 32,
-    fontWeight: '800',
-    color: COLORS.primaryDark,
-  },
-  emptyTitle: {
-    fontSize: 26,
-    fontWeight: '800',
-    color: COLORS.white,
-    marginBottom: 2,
-  },
-  emptySubtitle: {
-    fontSize: 13,
-    color: COLORS.secondaryFg,
-    marginBottom: 12,
-    letterSpacing: 1,
-  },
-  emptyDesc: {
-    fontSize: 14,
-    color: COLORS.mutedFg,
-    textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: 24,
-  },
-  quickGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-    justifyContent: 'center',
-    width: '100%',
-    marginBottom: 24,
-  },
-  quickCard: {
-    width: '47%',
-    backgroundColor: COLORS.card,
-    borderRadius: 14,
-    paddingVertical: 14,
-    paddingHorizontal: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    borderWidth: 0.5,
-  },
-  quickIconWrap: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  quickLabel: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: COLORS.text,
-    flex: 1,
-  },
-  presetTitle: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: COLORS.mutedFg,
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-    marginBottom: 10,
-    alignSelf: 'flex-start',
-  },
-  presetList: {
-    width: '100%',
-    gap: 6,
-  },
-  presetChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: COLORS.card,
-    borderRadius: 12,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderWidth: 0.5,
-    borderColor: COLORS.muted,
-  },
-  presetText: {
-    fontSize: 14,
-    color: COLORS.text,
-  },
-  // Messages
-  msgRow: {
-    flexDirection: 'row',
-    marginBottom: 16,
-    maxWidth: '88%',
-    alignItems: 'flex-end',
-    gap: 8,
-  },
-  msgRowUser: {
-    alignSelf: 'flex-end',
-    flexDirection: 'row',
-  },
-  msgRowAi: {
-    alignSelf: 'flex-start',
-    alignItems: 'flex-start',
-  },
-  avatarSmall: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: COLORS.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 2,
-  },
-  avatarText: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: COLORS.primaryDark,
-  },
-  userAvatar: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    backgroundColor: COLORS.muted,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 2,
-  },
-  bubble: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    maxWidth: '100%',
-  },
-  aiBubble: {
-    backgroundColor: COLORS.aiBubble,
-    borderRadius: 18,
-    borderTopLeftRadius: 4,
-    borderWidth: 0.5,
-    borderColor: 'rgba(255, 193, 7, 0.18)',
-  },
-  userBubble: {
-    backgroundColor: COLORS.userBubble,
-    borderRadius: 18,
-    borderTopRightRadius: 4,
-    borderWidth: 0.5,
-    borderColor: 'rgba(255, 255, 255, 0.06)',
-  },
-  aiLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.primary,
-    marginBottom: 4,
-    letterSpacing: 0.5,
-  },
-  msgText: {
-    fontSize: 15,
-    color: COLORS.text,
-    lineHeight: 23,
-  },
-  userMsgText: {
-    color: COLORS.white,
-  },
-  loadingRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  loadingBubble: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: COLORS.aiBubble,
-    borderRadius: 14,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderWidth: 0.5,
-    borderColor: 'rgba(255, 193, 7, 0.15)',
-  },
-  loadingText: {
-    color: COLORS.mutedFg,
-    fontSize: 13,
-  },
-  inlinePresets: {
-    paddingHorizontal: 16,
-    paddingBottom: 8,
-    gap: 8,
-  },
-  inlineChip: {
-    backgroundColor: COLORS.card,
-    borderRadius: 20,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderWidth: 0.5,
-    borderColor: COLORS.muted,
-  },
-  inlineChipText: {
-    fontSize: 12,
-    color: COLORS.secondaryFg,
-    fontWeight: '500',
-  },
-  // Recording
-  recordingBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    backgroundColor: 'rgba(239, 68, 68, 0.1)',
-    borderTopWidth: 0.5,
-    borderTopColor: 'rgba(239, 68, 68, 0.3)',
-  },
-  recordingDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: COLORS.recording,
-  },
-  recordingText: {
-    flex: 1,
-    fontSize: 14,
-    color: COLORS.recording,
-    fontWeight: '600',
-  },
-  stopRecBtn: {
-    paddingHorizontal: 16,
-    paddingVertical: 6,
-    borderRadius: 16,
-    backgroundColor: COLORS.recording,
-  },
-  stopRecText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.white,
-  },
-  transcribingBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    backgroundColor: 'rgba(255, 193, 7, 0.06)',
-    borderTopWidth: 0.5,
-    borderTopColor: 'rgba(255, 193, 7, 0.15)',
-  },
-  transcribingText: {
-    fontSize: 13,
-    color: COLORS.secondaryFg,
-  },
-  // Input area
-  inputContainer: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    gap: 10,
-    borderTopWidth: 0.5,
-    borderTopColor: COLORS.muted,
-    backgroundColor: COLORS.bg,
-  },
-  input: {
-    flex: 1,
-    backgroundColor: '#1A1918',
-    borderRadius: 24,
-    paddingHorizontal: 20,
-    paddingVertical: Platform.OS === 'ios' ? 14 : 10,
-    fontSize: 15,
-    color: COLORS.white,
-    maxHeight: 120,
-    borderWidth: 0.5,
-    borderColor: COLORS.muted,
-  },
-  micBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: COLORS.card,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: COLORS.primary + '40',
-  },
-  micBtnRecording: {
-    backgroundColor: COLORS.recording,
-    borderColor: COLORS.recording,
-  },
-  sendBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: COLORS.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  sendBtnDisabled: {
-    opacity: 0.4,
-  },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingTop: Platform.OS === 'android' ? 44 : 12, paddingBottom: 12, borderBottomWidth: 0.5, borderBottomColor: COLORS.muted },
+  headerLeft: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  headerAvatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: COLORS.primary, alignItems: 'center', justifyContent: 'center' },
+  headerAvatarText: { fontSize: 18, fontWeight: '800', color: COLORS.primaryDark },
+  headerTitle: { fontSize: 18, fontWeight: '700', color: COLORS.white },
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  statusDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#22C55E' },
+  headerSub: { fontSize: 12, color: '#22C55E' },
+  newChatBtn: { padding: 8 },
+  emptyList: { flexGrow: 1, justifyContent: 'center' },
+  msgList: { paddingHorizontal: 16, paddingVertical: 12, paddingBottom: 8 },
+  emptyContainer: { alignItems: 'center', paddingHorizontal: 24 },
+  logoCircle: { width: 72, height: 72, borderRadius: 36, backgroundColor: COLORS.primary, alignItems: 'center', justifyContent: 'center', marginBottom: 12 },
+  logoText: { fontSize: 32, fontWeight: '800', color: COLORS.primaryDark },
+  emptyTitle: { fontSize: 26, fontWeight: '800', color: COLORS.white, marginBottom: 2 },
+  emptySubtitle: { fontSize: 13, color: COLORS.secondaryFg, marginBottom: 12, letterSpacing: 1 },
+  emptyDesc: { fontSize: 14, color: COLORS.mutedFg, textAlign: 'center', lineHeight: 20, marginBottom: 24 },
+  quickGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, justifyContent: 'center', width: '100%', marginBottom: 24 },
+  quickCard: { width: '47%', backgroundColor: COLORS.card, borderRadius: 14, paddingVertical: 14, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 10, borderWidth: 0.5 },
+  quickIconWrap: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  quickLabel: { fontSize: 13, fontWeight: '600', color: COLORS.text, flex: 1 },
+  presetTitle: { fontSize: 12, fontWeight: '600', color: COLORS.mutedFg, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 10, alignSelf: 'flex-start' },
+  presetList: { width: '100%', gap: 6 },
+  presetChip: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: COLORS.card, borderRadius: 12, paddingVertical: 12, paddingHorizontal: 16, borderWidth: 0.5, borderColor: COLORS.muted },
+  presetText: { fontSize: 14, color: COLORS.text },
+  msgRow: { flexDirection: 'row', marginBottom: 16, maxWidth: '88%', alignItems: 'flex-end', gap: 8 },
+  msgRowUser: { alignSelf: 'flex-end', flexDirection: 'row' },
+  msgRowAi: { alignSelf: 'flex-start', alignItems: 'flex-start' },
+  avatarSmall: { width: 30, height: 30, borderRadius: 15, backgroundColor: COLORS.primary, alignItems: 'center', justifyContent: 'center', marginBottom: 2 },
+  avatarText: { fontSize: 13, fontWeight: '800', color: COLORS.primaryDark },
+  userAvatar: { width: 26, height: 26, borderRadius: 13, backgroundColor: COLORS.muted, alignItems: 'center', justifyContent: 'center', marginBottom: 2 },
+  bubble: { paddingHorizontal: 16, paddingVertical: 12, maxWidth: '100%' },
+  aiBubble: { backgroundColor: COLORS.aiBubble, borderRadius: 18, borderTopLeftRadius: 4, borderWidth: 0.5, borderColor: 'rgba(255, 193, 7, 0.18)' },
+  userBubble: { backgroundColor: COLORS.userBubble, borderRadius: 18, borderTopRightRadius: 4, borderWidth: 0.5, borderColor: 'rgba(255, 255, 255, 0.06)' },
+  aiLabel: { fontSize: 11, fontWeight: '700', color: COLORS.primary, marginBottom: 4, letterSpacing: 0.5 },
+  msgText: { fontSize: 15, color: COLORS.text, lineHeight: 23 },
+  userMsgText: { color: COLORS.white },
+  // TTS Button
+  ttsBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 6, marginLeft: 4, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12, backgroundColor: 'rgba(255, 193, 7, 0.08)', alignSelf: 'flex-start', borderWidth: 0.5, borderColor: 'rgba(255, 193, 7, 0.12)' },
+  ttsBtnPlaying: { backgroundColor: 'rgba(239, 68, 68, 0.1)', borderColor: 'rgba(239, 68, 68, 0.2)' },
+  ttsText: { fontSize: 12, color: COLORS.primary, fontWeight: '600' },
+  ttsTextPlaying: { color: COLORS.recording },
+  // Loading
+  loadingRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingHorizontal: 16, paddingVertical: 8 },
+  loadingBubble: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: COLORS.aiBubble, borderRadius: 14, paddingHorizontal: 16, paddingVertical: 10, borderWidth: 0.5, borderColor: 'rgba(255, 193, 7, 0.15)' },
+  loadingText: { color: COLORS.mutedFg, fontSize: 13 },
+  inlinePresets: { paddingHorizontal: 16, paddingBottom: 8, gap: 8 },
+  inlineChip: { backgroundColor: COLORS.card, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8, borderWidth: 0.5, borderColor: COLORS.muted },
+  inlineChipText: { fontSize: 12, color: COLORS.secondaryFg, fontWeight: '500' },
+  recordingBar: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 10, backgroundColor: 'rgba(239, 68, 68, 0.1)', borderTopWidth: 0.5, borderTopColor: 'rgba(239, 68, 68, 0.3)' },
+  recordingDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: COLORS.recording },
+  recordingText: { flex: 1, fontSize: 14, color: COLORS.recording, fontWeight: '600' },
+  stopRecBtn: { paddingHorizontal: 16, paddingVertical: 6, borderRadius: 16, backgroundColor: COLORS.recording },
+  stopRecText: { fontSize: 13, fontWeight: '700', color: COLORS.white },
+  transcribingBar: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, paddingVertical: 10, backgroundColor: 'rgba(255, 193, 7, 0.06)', borderTopWidth: 0.5, borderTopColor: 'rgba(255, 193, 7, 0.15)' },
+  transcribingText: { fontSize: 13, color: COLORS.secondaryFg },
+  inputContainer: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 16, paddingVertical: 12, gap: 10, borderTopWidth: 0.5, borderTopColor: COLORS.muted, backgroundColor: COLORS.bg },
+  input: { flex: 1, backgroundColor: '#1A1918', borderRadius: 24, paddingHorizontal: 20, paddingVertical: Platform.OS === 'ios' ? 14 : 10, fontSize: 15, color: COLORS.white, maxHeight: 120, borderWidth: 0.5, borderColor: COLORS.muted },
+  micBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: COLORS.card, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: COLORS.primary + '40' },
+  micBtnRecording: { backgroundColor: COLORS.recording, borderColor: COLORS.recording },
+  sendBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: COLORS.primary, alignItems: 'center', justifyContent: 'center' },
+  sendBtnDisabled: { opacity: 0.4 },
 });

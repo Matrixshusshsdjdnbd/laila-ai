@@ -3,10 +3,11 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from emergentintegrations.llm.chat import LlmChat, UserMessage
-from emergentintegrations.llm.openai import OpenAISpeechToText
+from emergentintegrations.llm.openai import OpenAISpeechToText, OpenAITextToSpeech
 import os
 import logging
 import tempfile
+import base64
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -561,6 +562,36 @@ async def transcribe_audio(file: UploadFile = File(...), language: str = Form(de
     except Exception as e:
         logger.error(f"Transcription error: {e}")
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
+
+
+class TTSRequest(BaseModel):
+    text: str
+    voice: str = "nova"
+
+@api_router.post("/tts")
+async def text_to_speech(req: TTSRequest):
+    try:
+        if not req.text or not req.text.strip():
+            raise HTTPException(status_code=400, detail="Text is required")
+        
+        # Limit text to 4096 chars (OpenAI limit)
+        text = req.text.strip()[:4096]
+        
+        tts = OpenAITextToSpeech(api_key=EMERGENT_LLM_KEY)
+        audio_base64 = await tts.generate_speech_base64(
+            text=text,
+            model="tts-1",
+            voice=req.voice,
+            response_format="mp3",
+            speed=1.0,
+        )
+        
+        return {"audio": audio_base64, "format": "mp3"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"TTS error: {e}")
+        raise HTTPException(status_code=500, detail=f"Speech generation failed: {str(e)}")
 
 
 # Include router

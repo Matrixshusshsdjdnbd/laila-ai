@@ -23,7 +23,9 @@
         "backgroundColor": "#0A0908"
       },
       "edgeToEdgeEnabled": true,
-      "permissions": ["RECORD_AUDIO"]
+      "permissions": [
+        "RECORD_AUDIO"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -40,7 +42,8 @@
           "resizeMode": "contain",
           "backgroundColor": "#0A0908"
         }
-      ]
+      ],
+      "expo-audio"
     ],
     "experiments": {
       "typedRoutes": true
