@@ -2,9 +2,10 @@ import React, { useState, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
   FlatList, KeyboardAvoidingView, Platform, ActivityIndicator,
-  SafeAreaView, Keyboard, ScrollView,
+  SafeAreaView, Keyboard, ScrollView, Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { Audio } from 'expo-av';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 const DEVICE_ID = 'device-' + Math.random().toString(36).substring(2, 10);
@@ -22,7 +23,7 @@ const COLORS = {
   text: '#E4E4E7',
   aiBubble: '#15130F',
   userBubble: '#2C2520',
-  aiAccent: 'rgba(255, 193, 7, 0.12)',
+  recording: '#EF4444',
 };
 
 type Message = {
@@ -33,10 +34,10 @@ type Message = {
 };
 
 const QUICK_ACTIONS = [
-  { id: 'work', icon: 'briefcase', label: 'Find Work', color: '#F59E0B', emoji: '' },
-  { id: 'business', icon: 'trending-up', label: 'Start Business', color: '#10B981', emoji: '' },
-  { id: 'translate', icon: 'language', label: 'Translate', color: '#3B82F6', emoji: '' },
-  { id: 'chat', icon: 'chatbubble', label: 'Ask Anything', color: '#A855F7', emoji: '' },
+  { id: 'work', icon: 'briefcase', label: 'Find Work', color: '#F59E0B' },
+  { id: 'business', icon: 'trending-up', label: 'Start Business', color: '#10B981' },
+  { id: 'translate', icon: 'language', label: 'Translate', color: '#3B82F6' },
+  { id: 'chat', icon: 'chatbubble', label: 'Ask Anything', color: '#A855F7' },
 ];
 
 const PRESET_PROMPTS = [
@@ -52,7 +53,12 @@ export default function ChatScreen() {
   const [loading, setLoading] = useState(false);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [mode, setMode] = useState('chat');
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [recordingDuration, setRecordingDuration] = useState(0);
   const flatListRef = useRef<FlatList>(null);
+  const recordingRef = useRef<Audio.Recording | null>(null);
+  const durationInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const sendMessage = useCallback(async (text?: string, chatMode?: string) => {
     const msg = text || input.trim();
@@ -98,6 +104,122 @@ export default function ChatScreen() {
       setLoading(false);
     }
   }, [input, loading, conversationId, mode]);
+
+  // ─── Voice Recording ──────────────────────────────────
+  const startRecording = async () => {
+    try {
+      const permission = await Audio.requestPermissionsAsync();
+      if (!permission.granted) {
+        Alert.alert('Permission needed', 'Please allow microphone access to use voice input.');
+        return;
+      }
+
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+      
+      recordingRef.current = recording;
+      setIsRecording(true);
+      setRecordingDuration(0);
+
+      durationInterval.current = setInterval(() => {
+        setRecordingDuration(prev => prev + 1);
+      }, 1000);
+    } catch (err) {
+      console.error('Failed to start recording:', err);
+      Alert.alert('Error', 'Could not start recording. Please check microphone permissions.');
+    }
+  };
+
+  const stopRecording = async () => {
+    if (!recordingRef.current) return;
+
+    try {
+      setIsRecording(false);
+      if (durationInterval.current) {
+        clearInterval(durationInterval.current);
+        durationInterval.current = null;
+      }
+
+      await recordingRef.current.stopAndUnloadAsync();
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
+
+      const uri = recordingRef.current.getURI();
+      recordingRef.current = null;
+
+      if (!uri) {
+        Alert.alert('Error', 'No audio recorded.');
+        return;
+      }
+
+      // Transcribe
+      setIsTranscribing(true);
+      await transcribeAudio(uri);
+    } catch (err) {
+      console.error('Failed to stop recording:', err);
+      setIsTranscribing(false);
+    }
+  };
+
+  const transcribeAudio = async (uri: string) => {
+    try {
+      const formData = new FormData();
+      
+      // Determine the correct mime type and filename
+      const fileExtension = uri.split('.').pop() || 'm4a';
+      const mimeType = fileExtension === 'webm' ? 'audio/webm' : 
+                       fileExtension === 'wav' ? 'audio/wav' : 
+                       fileExtension === 'mp3' ? 'audio/mp3' : 'audio/m4a';
+      
+      formData.append('file', {
+        uri: uri,
+        type: mimeType,
+        name: `recording.${fileExtension}`,
+      } as any);
+      formData.append('language', '');
+
+      const res = await fetch(`${BACKEND_URL}/api/transcribe`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || 'Transcription failed');
+      }
+
+      const data = await res.json();
+      if (data.text && data.text.trim()) {
+        setInput(prev => prev ? prev + ' ' + data.text.trim() : data.text.trim());
+      } else {
+        Alert.alert('No speech detected', 'Please try speaking louder or closer to the microphone.');
+      }
+    } catch (err: any) {
+      console.error('Transcription error:', err);
+      Alert.alert('Transcription failed', 'Could not convert speech to text. Please try again.');
+    } finally {
+      setIsTranscribing(false);
+    }
+  };
+
+  const toggleRecording = () => {
+    if (isRecording) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  };
+
+  const formatDuration = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
 
   const handleQuickAction = (actionId: string) => {
     const prompts: Record<string, string> = {
@@ -157,7 +279,6 @@ export default function ChatScreen() {
         Your AI assistant for work, study, business, and daily life in Africa.
       </Text>
 
-      {/* Quick Action Buttons */}
       <View style={styles.quickGrid}>
         {QUICK_ACTIONS.map((action) => (
           <TouchableOpacity
@@ -175,7 +296,6 @@ export default function ChatScreen() {
         ))}
       </View>
 
-      {/* Preset Prompts */}
       <Text style={styles.presetTitle}>Quick start</Text>
       <View style={styles.presetList}>
         {PRESET_PROMPTS.map((preset, idx) => (
@@ -224,7 +344,6 @@ export default function ChatScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
       >
-        {/* Messages */}
         <FlatList
           ref={flatListRef}
           data={messages}
@@ -253,7 +372,7 @@ export default function ChatScreen() {
           </View>
         )}
 
-        {/* Inline preset chips when in conversation */}
+        {/* Inline preset chips */}
         {messages.length > 0 && !loading && (
           <ScrollView
             horizontal
@@ -273,6 +392,29 @@ export default function ChatScreen() {
           </ScrollView>
         )}
 
+        {/* Recording indicator */}
+        {isRecording && (
+          <View style={styles.recordingBar}>
+            <View style={styles.recordingDot} />
+            <Text style={styles.recordingText}>Recording... {formatDuration(recordingDuration)}</Text>
+            <TouchableOpacity
+              testID="stop-recording-btn"
+              onPress={stopRecording}
+              style={styles.stopRecBtn}
+            >
+              <Text style={styles.stopRecText}>Stop</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Transcribing indicator */}
+        {isTranscribing && (
+          <View style={styles.transcribingBar}>
+            <ActivityIndicator size="small" color={COLORS.primary} />
+            <Text style={styles.transcribingText}>Converting speech to text...</Text>
+          </View>
+        )}
+
         {/* Input */}
         <View style={styles.inputContainer}>
           <TextInput
@@ -286,14 +428,34 @@ export default function ChatScreen() {
             maxLength={2000}
             returnKeyType="default"
           />
-          <TouchableOpacity
-            testID="send-message-btn"
-            style={[styles.sendBtn, (!input.trim() || loading) && styles.sendBtnDisabled]}
-            onPress={() => sendMessage()}
-            disabled={!input.trim() || loading}
-          >
-            <Ionicons name="arrow-up" size={20} color={COLORS.primaryDark} />
-          </TouchableOpacity>
+          
+          {/* Mic button - show when input is empty */}
+          {!input.trim() && !loading && (
+            <TouchableOpacity
+              testID="mic-btn"
+              style={[styles.micBtn, isRecording && styles.micBtnRecording]}
+              onPress={toggleRecording}
+              disabled={isTranscribing}
+            >
+              <Ionicons
+                name={isRecording ? 'stop' : 'mic'}
+                size={22}
+                color={isRecording ? COLORS.white : COLORS.primary}
+              />
+            </TouchableOpacity>
+          )}
+
+          {/* Send button - show when input has text */}
+          {(input.trim() || loading) && (
+            <TouchableOpacity
+              testID="send-message-btn"
+              style={[styles.sendBtn, (!input.trim() || loading) && styles.sendBtnDisabled]}
+              onPress={() => sendMessage()}
+              disabled={!input.trim() || loading}
+            >
+              <Ionicons name="arrow-up" size={20} color={COLORS.primaryDark} />
+            </TouchableOpacity>
+          )}
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -576,6 +738,55 @@ const styles = StyleSheet.create({
     color: COLORS.secondaryFg,
     fontWeight: '500',
   },
+  // Recording
+  recordingBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    borderTopWidth: 0.5,
+    borderTopColor: 'rgba(239, 68, 68, 0.3)',
+  },
+  recordingDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: COLORS.recording,
+  },
+  recordingText: {
+    flex: 1,
+    fontSize: 14,
+    color: COLORS.recording,
+    fontWeight: '600',
+  },
+  stopRecBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: COLORS.recording,
+  },
+  stopRecText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.white,
+  },
+  transcribingBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(255, 193, 7, 0.06)',
+    borderTopWidth: 0.5,
+    borderTopColor: 'rgba(255, 193, 7, 0.15)',
+  },
+  transcribingText: {
+    fontSize: 13,
+    color: COLORS.secondaryFg,
+  },
+  // Input area
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'flex-end',
@@ -597,6 +808,20 @@ const styles = StyleSheet.create({
     maxHeight: 120,
     borderWidth: 0.5,
     borderColor: COLORS.muted,
+  },
+  micBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: COLORS.card,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.primary + '40',
+  },
+  micBtnRecording: {
+    backgroundColor: COLORS.recording,
+    borderColor: COLORS.recording,
   },
   sendBtn: {
     width: 44,

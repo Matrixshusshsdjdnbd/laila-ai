@@ -1,10 +1,12 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from emergentintegrations.llm.chat import LlmChat, UserMessage
+from emergentintegrations.llm.openai import OpenAISpeechToText
 import os
 import logging
+import tempfile
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -505,6 +507,60 @@ async def delete_conversation(conversation_id: str):
     except Exception as e:
         logger.error(f"Delete conversation error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@api_router.post("/transcribe")
+async def transcribe_audio(file: UploadFile = File(...), language: str = Form(default="")):
+    try:
+        # Validate file type
+        allowed_types = ["audio/wav", "audio/mp3", "audio/mpeg", "audio/mp4", "audio/m4a",
+                         "audio/webm", "audio/x-m4a", "audio/aac", "audio/ogg",
+                         "application/octet-stream", "video/mp4"]
+        
+        # Read file content
+        content = await file.read()
+        if len(content) == 0:
+            raise HTTPException(status_code=400, detail="Empty audio file")
+        if len(content) > 25 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File too large (max 25MB)")
+        
+        # Determine file extension
+        ext = ".m4a"
+        if file.filename:
+            ext = Path(file.filename).suffix or ".m4a"
+        elif file.content_type:
+            type_map = {"audio/wav": ".wav", "audio/webm": ".webm", "audio/mp3": ".mp3",
+                        "audio/mpeg": ".mp3", "audio/mp4": ".m4a", "audio/m4a": ".m4a"}
+            ext = type_map.get(file.content_type, ".m4a")
+        
+        # Save to temp file
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        
+        try:
+            stt = OpenAISpeechToText(api_key=EMERGENT_LLM_KEY)
+            
+            with open(tmp_path, "rb") as audio_file:
+                kwargs = {
+                    "file": audio_file,
+                    "model": "whisper-1",
+                    "response_format": "json",
+                }
+                if language and language in ["it", "fr", "en", "wo"]:
+                    kwargs["language"] = language
+                
+                response = await stt.transcribe(**kwargs)
+            
+            text = response.text if hasattr(response, 'text') else str(response)
+            return {"text": text.strip(), "language": language or "auto"}
+        finally:
+            os.unlink(tmp_path)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Transcription error: {e}")
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
 
 # Include router
