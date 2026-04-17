@@ -70,7 +70,7 @@ export default function AuthScreen({ onAuthSuccess }: AuthScreenProps) {
   const handleGoogleLogin = async () => {
     try {
       // REMINDER: DO NOT HARDCODE THE URL, OR ADD ANY FALLBACKS OR REDIRECT URLS, THIS BREAKS THE AUTH
-      const redirectUrl = `${BACKEND_URL}/api/auth/google-callback`;
+      const redirectUrl = `${window.location.origin}/api/auth/google-callback`;
       const authUrl = `https://auth.emergentagent.com/?redirect=${encodeURIComponent(redirectUrl)}`;
       await WebBrowser.openBrowserAsync(authUrl);
     } catch (err) {
