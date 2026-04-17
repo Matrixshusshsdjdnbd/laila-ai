@@ -38,7 +38,10 @@ app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
 # ─── Constants ────────────────────────────────────────────
-FREE_DAILY_LIMIT = 20
+# Smart freemium: unlimited chat, limits on premium features
+FREE_IMAGE_GEN_DAILY = 2
+FREE_IMAGE_ANALYSIS_DAILY = 5
+FREE_TTS_DAILY = 10
 PREMIUM_DAILY_LIMIT = 999999
 
 # ─── Auth Helpers ─────────────────────────────────────────
@@ -85,6 +88,13 @@ async def require_user(request: Request) -> dict:
     return user
 
 async def check_daily_limit(user: dict) -> bool:
+    """Chat is always unlimited. Returns True always for backward compat."""
+    return True
+
+async def check_feature_limit(user: dict, feature: str) -> bool:
+    """Smart freemium: check limits per feature, not per message."""
+    if user.get("tier") == "premium":
+        return True
     now = datetime.now(timezone.utc)
     reset_date = user.get("daily_reset")
     if isinstance(reset_date, str):
@@ -92,13 +102,18 @@ async def check_daily_limit(user: dict) -> bool:
     if reset_date and reset_date.tzinfo is None:
         reset_date = reset_date.replace(tzinfo=timezone.utc)
     if not reset_date or reset_date.date() < now.date():
-        await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"daily_messages": 0, "daily_reset": now.isoformat()}})
-        user["daily_messages"] = 0
-    limit = PREMIUM_DAILY_LIMIT if user.get("tier") == "premium" else FREE_DAILY_LIMIT
-    return user.get("daily_messages", 0) < limit
+        await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"daily_messages": 0, "daily_image_gen": 0, "daily_image_analysis": 0, "daily_tts": 0, "daily_reset": now.isoformat()}})
+        return True
+    limits = {"image_gen": (FREE_IMAGE_GEN_DAILY, "daily_image_gen"), "image_analysis": (FREE_IMAGE_ANALYSIS_DAILY, "daily_image_analysis"), "tts": (FREE_TTS_DAILY, "daily_tts")}
+    if feature in limits:
+        max_count, field = limits[feature]
+        return user.get(field, 0) < max_count
+    return True
 
-async def increment_daily_count(user_id: str):
-    await db.users.update_one({"user_id": user_id}, {"$inc": {"daily_messages": 1}})
+async def increment_feature_count(user_id: str, feature: str):
+    field_map = {"chat": "daily_messages", "image_gen": "daily_image_gen", "image_analysis": "daily_image_analysis", "tts": "daily_tts"}
+    field = field_map.get(feature, "daily_messages")
+    await db.users.update_one({"user_id": user_id}, {"$inc": {field: 1}})
 
 # ─── Models ───────────────────────────────────────────────
 
@@ -344,7 +359,7 @@ async def get_me(request: Request):
         "user_id": user["user_id"], "email": user["email"], "name": user["name"],
         "tier": tier, "tier_label": tier_label,
         "daily_messages": user.get("daily_messages", 0),
-        "daily_limit": PREMIUM_DAILY_LIMIT if tier == "premium" else FREE_DAILY_LIMIT,
+        "daily_limit": "unlimited" if tier == "premium" else "unlimited chat",
         "referral_code": user.get("referral_code", ""),
         "referral_count": user.get("referral_count", 0),
     }
@@ -370,8 +385,6 @@ async def chat_endpoint(req: ChatRequest, request: Request):
     try:
         user = await get_current_user(request)
         user_id = user["user_id"] if user else "anonymous"
-        if user and not await check_daily_limit(user):
-            raise HTTPException(status_code=429, detail=f"Daily limit reached ({FREE_DAILY_LIMIT} messages). Upgrade to Premium for unlimited access.")
         conv = await get_or_create_conversation(user_id, req.mode, req.conversation_id)
         conv_id = conv["id"]
         await save_message(conv_id, "user", req.message)
@@ -405,7 +418,7 @@ async def chat_endpoint(req: ChatRequest, request: Request):
         title = req.message[:50] if conv.get("title") == "New Conversation" else conv["title"]
         await db.conversations.update_one({"id": conv_id}, {"$set": {"title": title, "last_message": clean_response[:100], "updated_at": datetime.now(timezone.utc).isoformat()}})
         if user:
-            await increment_daily_count(user["user_id"])
+            await increment_feature_count(user["user_id"], "chat")
         return {"conversation_id": conv_id, "message": assistant_msg}
     except HTTPException:
         raise
@@ -418,8 +431,8 @@ async def chat_image(file: UploadFile = File(...), message: str = Form(default="
     try:
         user = await get_current_user(request) if request else None
         user_id = user["user_id"] if user else "anonymous"
-        if user and not await check_daily_limit(user):
-            raise HTTPException(status_code=429, detail=f"Daily limit reached. Upgrade to Premium.")
+        if user and not await check_feature_limit(user, "image_analysis"):
+            raise HTTPException(status_code=429, detail=f"Free limit: {FREE_IMAGE_ANALYSIS_DAILY} image analyses/day. Upgrade to Premium for unlimited.")
         content = await file.read()
         if len(content) == 0:
             raise HTTPException(status_code=400, detail="Empty image file")
@@ -438,7 +451,7 @@ async def chat_image(file: UploadFile = File(...), message: str = Form(default="
         title = message[:50] if conv.get("title") == "New Conversation" else conv["title"]
         await db.conversations.update_one({"id": conv_id}, {"$set": {"title": title, "last_message": response[:100], "updated_at": datetime.now(timezone.utc).isoformat()}})
         if user:
-            await increment_daily_count(user["user_id"])
+            await increment_feature_count(user["user_id"], "image_analysis")
         return {"conversation_id": conv_id, "message": assistant_msg}
     except HTTPException:
         raise
@@ -450,15 +463,15 @@ async def chat_image(file: UploadFile = File(...), message: str = Form(default="
 async def translate_endpoint(req: TranslateRequest, request: Request):
     try:
         user = await get_current_user(request)
-        if user and not await check_daily_limit(user):
-            raise HTTPException(status_code=429, detail="Daily limit reached.")
+        if user and not await check_feature_limit(user, "chat"):
+            pass  # Chat is unlimited
         lang_names = {"wo": "Wolof", "fr": "French", "en": "English", "it": "Italian"}
         source = lang_names.get(req.source_lang, req.source_lang)
         target = lang_names.get(req.target_lang, req.target_lang)
         prompt = f"Translate from {source} to {target}. Translation first, then brief explanation.\n\nText: {req.text}"
         response = await call_ai(SYSTEM_PROMPTS["translate"], prompt, f"laila-tr-{uuid.uuid4().hex[:8]}")
         if user:
-            await increment_daily_count(user["user_id"])
+            await increment_feature_count(user["user_id"], "chat")
         return {"translation": response, "source_lang": req.source_lang, "target_lang": req.target_lang}
     except HTTPException:
         raise
@@ -471,8 +484,7 @@ async def generate_endpoint(req: GenerateRequest, request: Request):
     try:
         user = await get_current_user(request)
         user_id = user["user_id"] if user else "anonymous"
-        if user and not await check_daily_limit(user):
-            raise HTTPException(status_code=429, detail="Daily limit reached.")
+        # Generate is unlimited (text-based)
         prompt_template = GENERATE_PROMPTS.get(req.type)
         if not prompt_template:
             raise HTTPException(status_code=400, detail=f"Unknown type: {req.type}")
@@ -486,7 +498,7 @@ async def generate_endpoint(req: GenerateRequest, request: Request):
         title = f"{req.type.replace('_', ' ').title()}" if conv.get("title") == "New Conversation" else conv["title"]
         await db.conversations.update_one({"id": conv_id}, {"$set": {"title": title, "last_message": response[:100], "updated_at": datetime.now(timezone.utc).isoformat()}})
         if user:
-            await increment_daily_count(user["user_id"])
+            await increment_feature_count(user["user_id"], "chat")
         return {"conversation_id": conv_id, "message": assistant_msg}
     except HTTPException:
         raise
@@ -590,7 +602,7 @@ class PaymentInitRequest(BaseModel):
 
 @api_router.get("/payment/plans")
 async def get_plans():
-    return {"plans": PLANS, "free_limit": FREE_DAILY_LIMIT}
+    return {"plans": PLANS, "free_limits": {"chat": "unlimited", "image_gen": FREE_IMAGE_GEN_DAILY, "image_analysis": FREE_IMAGE_ANALYSIS_DAILY, "tts": FREE_TTS_DAILY}}
 
 @api_router.post("/payment/initiate")
 async def initiate_payment(req: PaymentInitRequest, request: Request):
@@ -793,8 +805,8 @@ async def generate_image(req: ImageGenRequest, request: Request):
     try:
         user = await get_current_user(request)
         user_id = user["user_id"] if user else "anonymous"
-        if user and not await check_daily_limit(user):
-            raise HTTPException(status_code=429, detail="Daily limit reached.")
+        if user and not await check_feature_limit(user, "image_gen"):
+            raise HTTPException(status_code=429, detail=f"Free limit: {FREE_IMAGE_GEN_DAILY} image generations/day. Upgrade to Premium for unlimited.")
 
         image_gen = OpenAIImageGeneration(api_key=EMERGENT_LLM_KEY)
         images = await image_gen.generate_images(
@@ -817,7 +829,7 @@ async def generate_image(req: ImageGenRequest, request: Request):
         await db.conversations.update_one({"id": conv_id}, {"$set": {"title": title, "last_message": f"Generated: {req.prompt[:60]}", "updated_at": datetime.now(timezone.utc).isoformat()}})
 
         if user:
-            await increment_daily_count(user["user_id"])
+            await increment_feature_count(user["user_id"], "image_gen")
 
         return {"conversation_id": conv_id, "message": assistant_msg, "image_base64": image_base64}
     except HTTPException:
