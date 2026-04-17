@@ -47,7 +47,7 @@ const PRESET_PROMPTS = [
   { label: 'Write my CV', mode: 'work', prompt: 'Help me create a professional CV. Ask me the questions you need to build it.' },
   { label: 'Business ideas', mode: 'business', prompt: 'Give me 3 practical business ideas I can start today with my phone and small capital.' },
   { label: 'Help with homework', mode: 'study', prompt: 'I need help with my homework. I will send you the problem.' },
-  { label: 'Translate to Wolof', mode: 'chat', prompt: 'I want to translate something to Wolof. What text should I give you?' },
+  { label: 'Generate an image', mode: 'chat', prompt: 'Generate image of a beautiful sunset over Dakar, Senegal' },
 ];
 
 export default function ChatScreen() {
@@ -77,6 +77,24 @@ export default function ChatScreen() {
   const sendMessage = useCallback(async (text?: string, chatMode?: string) => {
     const msg = text || input.trim();
     if (!msg || loading) return;
+
+    // Smart detect: if user asks for image generation, route to image gen
+    const imageKeywords = ['generate image', 'create image', 'make image', 'draw me', 'draw a', 'genera immagine', 'crea immagine', 'créer image', 'créer une image', 'génère image', 'génère une image', 'dessine', 'create a picture', 'make a picture', 'generate a picture', 'disegna', 'fai un\'immagine', 'crea un\'immagine', 'generate an image', 'make an image', 'create an image', 'dessine moi', 'fais une image', 'nataal', 'def nataal'];
+    const lowerMsg = msg.toLowerCase();
+    if (imageKeywords.some(kw => lowerMsg.includes(kw))) {
+      // Extract the description after the keyword
+      let imgPrompt = msg;
+      for (const kw of imageKeywords) {
+        const idx = lowerMsg.indexOf(kw);
+        if (idx !== -1) {
+          const afterKw = msg.substring(idx + kw.length).trim().replace(/^(of|:|\s)+/i, '').trim();
+          if (afterKw.length > 3) { imgPrompt = afterKw; }
+          break;
+        }
+      }
+      generateImage(imgPrompt);
+      return;
+    }
 
     const userMsg: Message = {
       id: Date.now().toString(),
