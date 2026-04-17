@@ -12,7 +12,9 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.lailaai.app",
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "Record voice messages for AI assistant"
+        "NSMicrophoneUsageDescription": "Record voice messages for AI assistant",
+        "NSCameraUsageDescription": "Take photos for AI image analysis",
+        "NSPhotoLibraryUsageDescription": "Select photos for AI analysis"
       }
     },
     "android": {
@@ -24,7 +26,9 @@
       },
       "edgeToEdgeEnabled": true,
       "permissions": [
-        "RECORD_AUDIO"
+        "RECORD_AUDIO",
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE"
       ]
     },
     "web": {
@@ -43,7 +47,8 @@
           "backgroundColor": "#0A0908"
         }
       ],
-      "expo-audio"
+      "expo-audio",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true

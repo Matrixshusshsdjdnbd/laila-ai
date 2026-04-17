@@ -6,9 +6,10 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
+import * as ImagePicker from 'expo-image-picker';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
-const DEVICE_ID = 'device-' + Math.random().toString(36).substring(2, 10);
 
 const COLORS = {
   bg: '#0A0908',
@@ -58,10 +59,17 @@ export default function ChatScreen() {
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [loadingTtsId, setLoadingTtsId] = useState<string | null>(null);
+  const [authToken, setAuthToken] = useState<string | null>(null);
   const flatListRef = useRef<FlatList>(null);
   const recordingRef = useRef<Audio.Recording | null>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
   const durationInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  React.useEffect(() => {
+    AsyncStorage.getItem('laila_auth_token').then(t => setAuthToken(t));
+  }, []);
+
+  const authHeaders = () => authToken ? { Authorization: `Bearer ${authToken}` } : {};
 
   const sendMessage = useCallback(async (text?: string, chatMode?: string) => {
     const msg = text || input.trim();
@@ -82,16 +90,26 @@ export default function ChatScreen() {
     try {
       const res = await fetch(`${BACKEND_URL}/api/chat`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({
           message: msg,
           conversation_id: conversationId,
-          device_id: DEVICE_ID,
           mode: chatMode || mode,
         }),
       });
 
-      if (!res.ok) throw new Error('Failed to get response');
+      if (res.status === 429) {
+        const errData = await res.json();
+        setMessages(prev => [...prev, {
+          id: Date.now().toString() + '-limit',
+          role: 'assistant',
+          content: errData.detail || 'Daily limit reached. Upgrade to Premium for unlimited access!',
+          created_at: new Date().toISOString(),
+        }]);
+        setLoading(false);
+        return;
+      }
+      if (!res.ok) throw new Error('Failed');
       const data = await res.json();
       setConversationId(data.conversation_id);
       setMessages(prev => [...prev, data.message]);
@@ -230,6 +248,56 @@ export default function ChatScreen() {
 
   const toggleRecording = () => { isRecording ? stopRecording() : startRecording(); };
   const formatDuration = (s: number) => `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
+
+  // ─── Image Picker ─────────────────────────────────────
+  const pickImage = async (useCamera: boolean) => {
+    try {
+      if (useCamera) {
+        const perm = await ImagePicker.requestCameraPermissionsAsync();
+        if (!perm.granted) { Alert.alert('Permission needed', 'Please allow camera access.'); return; }
+      }
+      const result = useCamera
+        ? await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.7, base64: false })
+        : await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7, base64: false });
+      if (result.canceled || !result.assets?.[0]) return;
+      const asset = result.assets[0];
+      sendImage(asset.uri, input.trim() || 'What is in this image? Describe and help me.');
+    } catch (err) {
+      Alert.alert('Error', 'Could not pick image.');
+    }
+  };
+
+  const sendImage = async (uri: string, message: string) => {
+    const userMsg: Message = { id: Date.now().toString(), role: 'user', content: `[Photo] ${message}`, created_at: new Date().toISOString() };
+    setMessages(prev => [...prev, userMsg]);
+    setInput('');
+    setLoading(true);
+    Keyboard.dismiss();
+    try {
+      const formData = new FormData();
+      const ext = uri.split('.').pop() || 'jpg';
+      formData.append('file', { uri, type: `image/${ext === 'png' ? 'png' : 'jpeg'}`, name: `photo.${ext}` } as any);
+      formData.append('message', message);
+      formData.append('conversation_id', conversationId || '');
+      const res = await fetch(`${BACKEND_URL}/api/chat/image`, { method: 'POST', headers: authHeaders(), body: formData });
+      if (!res.ok) throw new Error('Image analysis failed');
+      const data = await res.json();
+      setConversationId(data.conversation_id);
+      setMessages(prev => [...prev, data.message]);
+    } catch {
+      setMessages(prev => [...prev, { id: Date.now().toString() + '-err', role: 'assistant', content: 'Sorry, could not analyze the image. Please try again.', created_at: new Date().toISOString() }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const showImageOptions = () => {
+    Alert.alert('Send Image', 'Choose image source', [
+      { text: 'Camera', onPress: () => pickImage(true) },
+      { text: 'Gallery', onPress: () => pickImage(false) },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  };
 
   const handleQuickAction = (actionId: string) => {
     const prompts: Record<string, string> = {
@@ -404,6 +472,10 @@ export default function ChatScreen() {
         )}
 
         <View style={styles.inputContainer}>
+          {/* Image picker button */}
+          <TouchableOpacity testID="image-btn" style={styles.imageBtn} onPress={showImageOptions} disabled={loading}>
+            <Ionicons name="camera" size={22} color={COLORS.mutedFg} />
+          </TouchableOpacity>
           <TextInput testID="chat-input" style={styles.input} placeholder="Ask LAILA anything..."
             placeholderTextColor={COLORS.mutedFg} value={input} onChangeText={setInput}
             multiline maxLength={2000} returnKeyType="default" />
@@ -487,8 +559,9 @@ const styles = StyleSheet.create({
   stopRecText: { fontSize: 13, fontWeight: '700', color: COLORS.white },
   transcribingBar: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 16, paddingVertical: 10, backgroundColor: 'rgba(255, 193, 7, 0.06)', borderTopWidth: 0.5, borderTopColor: 'rgba(255, 193, 7, 0.15)' },
   transcribingText: { fontSize: 13, color: COLORS.secondaryFg },
-  inputContainer: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 16, paddingVertical: 12, gap: 10, borderTopWidth: 0.5, borderTopColor: COLORS.muted, backgroundColor: COLORS.bg },
-  input: { flex: 1, backgroundColor: '#1A1918', borderRadius: 24, paddingHorizontal: 20, paddingVertical: Platform.OS === 'ios' ? 14 : 10, fontSize: 15, color: COLORS.white, maxHeight: 120, borderWidth: 0.5, borderColor: COLORS.muted },
+  inputContainer: { flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingVertical: 12, gap: 8, borderTopWidth: 0.5, borderTopColor: COLORS.muted, backgroundColor: COLORS.bg },
+  imageBtn: { width: 40, height: 44, alignItems: 'center', justifyContent: 'center' },
+  input: { flex: 1, backgroundColor: '#1A1918', borderRadius: 24, paddingHorizontal: 18, paddingVertical: Platform.OS === 'ios' ? 14 : 10, fontSize: 15, color: COLORS.white, maxHeight: 120, borderWidth: 0.5, borderColor: COLORS.muted },
   micBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: COLORS.card, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: COLORS.primary + '40' },
   micBtnRecording: { backgroundColor: COLORS.recording, borderColor: COLORS.recording },
   sendBtn: { width: 44, height: 44, borderRadius: 22, backgroundColor: COLORS.primary, alignItems: 'center', justifyContent: 'center' },

@@ -1,503 +1,427 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, Request, Depends
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+from emergentintegrations.llm.chat import LlmChat, UserMessage, FileContent
 from emergentintegrations.llm.openai import OpenAISpeechToText, OpenAITextToSpeech
 import os
 import logging
 import tempfile
 import base64
+import hashlib
+import secrets
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import httpx
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
+# Configure logging first
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# MongoDB
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Emergent LLM Key
+# Keys
 EMERGENT_LLM_KEY = os.environ['EMERGENT_LLM_KEY']
+JWT_SECRET = os.environ.get('JWT_SECRET', secrets.token_hex(32))
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
+# ─── Constants ────────────────────────────────────────────
+FREE_DAILY_LIMIT = 20
+PREMIUM_DAILY_LIMIT = 999999
+
+# ─── Auth Helpers ─────────────────────────────────────────
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    hashed = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000)
+    return f"{salt}:{hashed.hex()}"
+
+def verify_password(password: str, stored: str) -> bool:
+    salt, hashed = stored.split(':')
+    check = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 100000)
+    return check.hex() == hashed
+
+def generate_token() -> str:
+    return secrets.token_urlsafe(48)
+
+async def get_current_user(request: Request) -> Optional[dict]:
+    token = None
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    if not token:
+        token = request.cookies.get("session_token")
+    if not token:
+        return None
+    session = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+    if not session:
+        return None
+    expires_at = session.get("expires_at")
+    if isinstance(expires_at, str):
+        expires_at = datetime.fromisoformat(expires_at)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at < datetime.now(timezone.utc):
+        return None
+    user = await db.users.find_one({"user_id": session["user_id"]}, {"_id": 0})
+    return user
+
+async def require_user(request: Request) -> dict:
+    user = await get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user
+
+async def check_daily_limit(user: dict) -> bool:
+    now = datetime.now(timezone.utc)
+    reset_date = user.get("daily_reset")
+    if isinstance(reset_date, str):
+        reset_date = datetime.fromisoformat(reset_date)
+    if reset_date and reset_date.tzinfo is None:
+        reset_date = reset_date.replace(tzinfo=timezone.utc)
+    if not reset_date or reset_date.date() < now.date():
+        await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"daily_messages": 0, "daily_reset": now.isoformat()}})
+        user["daily_messages"] = 0
+    limit = PREMIUM_DAILY_LIMIT if user.get("tier") == "premium" else FREE_DAILY_LIMIT
+    return user.get("daily_messages", 0) < limit
+
+async def increment_daily_count(user_id: str):
+    await db.users.update_one({"user_id": user_id}, {"$inc": {"daily_messages": 1}})
+
 # ─── Models ───────────────────────────────────────────────
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: str = ""
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
 
 class ChatRequest(BaseModel):
     message: str
     conversation_id: Optional[str] = None
-    device_id: str
-    mode: str = "chat"  # chat, work, study, business, content
+    mode: str = "chat"
+
+class ImageChatRequest(BaseModel):
+    message: str = "What is in this image?"
+    conversation_id: Optional[str] = None
 
 class TranslateRequest(BaseModel):
     text: str
     source_lang: str
     target_lang: str
-    device_id: str
 
 class GenerateRequest(BaseModel):
-    type: str  # cv, job_ideas, business_ideas, social_media, homework, professional_message
+    type: str
     details: str
-    device_id: str
     conversation_id: Optional[str] = None
 
-class ConversationOut(BaseModel):
-    id: str
-    title: str
-    mode: str
-    last_message: str
-    created_at: str
-    updated_at: str
+class TTSRequest(BaseModel):
+    text: str
+    voice: str = "nova"
 
-class MessageOut(BaseModel):
-    id: str
-    role: str
-    content: str
-    created_at: str
+# ─── System Prompts ───────────────────────────────────────
 
-# ─── Helpers ──────────────────────────────────────────────
-
-# Core language rule injected into every prompt
-LANG_RULE = (
-    "\n\n## CRITICAL LANGUAGE RULE — FOLLOW STRICTLY:\n"
-    "You MUST detect the language the user writes in and reply ENTIRELY in that same language.\n"
-    "- User writes Italian → you reply 100% in Italian.\n"
-    "- User writes French → you reply 100% in French.\n"
-    "- User writes English → you reply 100% in English.\n"
-    "- User writes Wolof → you reply 100% in Wolof.\n"
-    "NEVER mix languages in one reply. NEVER default to English if the user wrote in another language.\n"
-    "If unsure, match the language of the user's last message.\n"
+CREATOR_IDENTITY = (
+    "\n\n## CREATOR IDENTITY:\n"
+    "You were created by **Bathie Sarr**, a Senegalese creator who built you to help people in Africa and beyond.\n"
+    "If someone asks who created you, who made you, who is your founder, or who built you, answer naturally and proudly:\n"
+    "'I was created by Bathie Sarr, a Senegalese creator who built me to help people in Africa and beyond.'\n"
+    "Only mention this when asked. Do not repeat it randomly.\n"
 )
 
-# Wolof quality guide injected into prompts that may generate Wolof
+LANG_RULE = (
+    "\n\n## CRITICAL LANGUAGE RULE:\n"
+    "Detect the language the user writes in and reply ENTIRELY in that same language.\n"
+    "- Italian → reply in Italian. French → French. English → English. Wolof → Wolof.\n"
+    "NEVER mix languages. Match the user's last message language.\n"
+)
+
 WOLOF_GUIDE = (
-    "\n\n## WOLOF LANGUAGE QUALITY GUIDE:\n"
-    "When writing in Wolof, follow these rules for natural, spoken Senegalese Wolof:\n"
-    "- Use common spoken Wolof as used daily in Dakar and across Senegal — NOT literary or archaic Wolof.\n"
-    "- Basic greetings: 'Nanga def?' (How are you?), 'Mangi fi rekk' (I'm fine), 'Jërejëf' (Thank you), 'Waaw' (Yes), 'Déedéet' (No).\n"
-    "- Common verbs: 'bëgg' (want), 'xam' (know), 'def' (do/make), 'dem' (go), 'ñów' (come), 'lekk' (eat), 'bind' (write), 'jàng' (read/study), 'liggéey' (work).\n"
-    "- Sentence structure: Subject + Verb marker + Verb + Object. Example: 'Maa ngi liggéey' (I am working).\n"
-    "- Use verb markers correctly: 'dama' (I do), 'danga' (you do), 'dafa' (he/she does), 'dañu' (we/they do).\n"
-    "- Pronouns: 'man' (I/me), 'yow' (you), 'moom' (he/she), 'nun' (we), 'yeen' (you pl.), 'ñoom' (they).\n"
-    "- Keep sentences short and clear — Wolof is a direct language.\n"
-    "- When a concept has no Wolof word, use the common French loanword that Senegalese people actually use (e.g., 'ordinateur', 'travail', 'business').\n"
-    "- Avoid inventing Wolof words. If unsure, use French loanword + Wolof sentence structure.\n"
-    "- Common useful phrases: 'Li ci gëna am solo' (The most important thing), 'Ndax mën nga...' (Can you...), 'Jël sa waxtu' (Take your time).\n"
+    "\n\n## WOLOF QUALITY GUIDE:\n"
+    "Use common spoken Wolof as used in Dakar and Senegal.\n"
+    "Greetings: 'Nanga def?', 'Mangi fi rekk', 'Jërejëf', 'Waaw', 'Déedéet'.\n"
+    "Verbs: 'bëgg' (want), 'xam' (know), 'def' (do), 'dem' (go), 'liggéey' (work), 'jàng' (study).\n"
+    "Structure: Subject + Verb marker + Verb + Object. Markers: 'dama', 'danga', 'dafa', 'dañu'.\n"
+    "Use French loanwords for concepts without Wolof equivalent.\n"
+)
+
+BASE_PROMPT = (
+    "You are LAILA AI — Africa Smart Assistant.\n"
+    "You are powerful, warm, and intelligent. Built to help people across Africa.\n"
+    "- Speak like a smart caring friend, not a robot.\n"
+    "- Be direct: answer first, explain after.\n"
+    "- Use short sentences, simple words, clear structure.\n"
+    "- Give examples from African contexts (Dakar, Lagos, Nairobi, etc.).\n"
+    "- Never say 'As an AI...' — just help.\n"
 )
 
 SYSTEM_PROMPTS = {
-    "chat": (
-        "You are LAILA AI — Africa Smart Assistant.\n"
-        "You are a powerful, warm, and intelligent AI built to help people across Africa in their daily life.\n\n"
-        "## Your personality:\n"
-        "- You speak like a smart, caring friend — not a robot.\n"
-        "- You are direct: give the answer first, then explain if needed.\n"
-        "- You use short sentences, simple words, and clear structure.\n"
-        "- You are encouraging and positive, but always honest and practical.\n"
-        "- You understand the realities of life in Africa: limited internet, mobile-first users, diverse economies.\n\n"
-        "## How you answer:\n"
-        "- Start with the most useful information immediately.\n"
-        "- Use bullet points or numbered lists when helpful.\n"
-        "- Give examples from real African contexts (Dakar, Lagos, Nairobi, Abidjan, Accra, etc.).\n"
-        "- If someone asks something vague, give a practical answer and then ask a follow-up question.\n"
-        "- Avoid long introductions, filler phrases, or overly formal tone.\n"
-        "- Never say 'As an AI...' or 'I'm just a language model...' — just help.\n\n"
-        "## What you can help with:\n"
-        "- Finding work, writing CVs, preparing for interviews\n"
-        "- Learning and studying (math, science, reading, writing)\n"
-        "- Starting and growing a small business\n"
-        "- Translating between Wolof, French, English, and Italian\n"
-        "- Writing messages, social media posts, emails\n"
-        "- Daily life questions: health tips, cooking, technology, finance\n"
-        + LANG_RULE + WOLOF_GUIDE
-    ),
-    "work": (
-        "You are LAILA AI — Africa Smart Assistant, specialized in WORK and CAREER.\n\n"
-        "## Your role:\n"
-        "You help people in Africa find work, build professional skills, and grow their careers.\n"
-        "You understand the African job market: informal economy, freelancing, remote work, diaspora opportunities, local businesses.\n\n"
-        "## How you help:\n"
-        "- Write professional CVs tailored for African and international markets.\n"
-        "- Give concrete job search advice: where to look, what to say, how to stand out.\n"
-        "- Help prepare for interviews with real practice questions.\n"
-        "- Suggest realistic career paths based on the person's skills and location.\n"
-        "- Recommend free online resources and training (YouTube, Coursera, local programs).\n\n"
-        "## Your style:\n"
-        "- Be specific: name real platforms (LinkedIn, Jumia Jobs, Jobberman, Expat-Dakar, etc.).\n"
-        "- Give step-by-step action plans, not vague advice.\n"
-        "- Be encouraging but realistic about opportunities.\n"
-        + LANG_RULE
-    ),
-    "study": (
-        "You are LAILA AI — Africa Smart Assistant, specialized in EDUCATION and TUTORING.\n\n"
-        "## Your role:\n"
-        "You are a patient, brilliant teacher who makes any topic easy to understand.\n"
-        "You help students from primary school to university level across Africa.\n\n"
-        "## How you teach:\n"
-        "- Break every problem into small, clear steps.\n"
-        "- Use everyday examples that African students relate to (market prices, local sports, family situations).\n"
-        "- For math: show each calculation step. Never skip steps.\n"
-        "- For reading/writing: explain grammar simply and give examples.\n"
-        "- For science: use practical, visual explanations.\n"
-        "- Ask 'Do you understand so far?' or 'Want me to explain differently?' to keep it interactive.\n\n"
-        "## Your style:\n"
-        "- Speak like the best teacher the student ever had — kind, clear, never condescending.\n"
-        "- Use emojis sparingly to make it friendly (one or two max).\n"
-        "- If a student is struggling, try a different approach — analogy, diagram description, simpler words.\n"
-        + LANG_RULE
-    ),
-    "business": (
-        "You are LAILA AI — Africa Smart Assistant, specialized in BUSINESS and ENTREPRENEURSHIP.\n\n"
-        "## Your role:\n"
-        "You help people across Africa start, grow, and manage businesses — even with very little capital.\n"
-        "You understand African markets: mobile money (Orange Money, M-Pesa, Wave), informal trade, WhatsApp commerce, local supply chains.\n\n"
-        "## How you help:\n"
-        "- Suggest realistic business ideas based on the person's budget, skills, and location.\n"
-        "- Give step-by-step startup plans with real cost estimates in local context.\n"
-        "- Explain how to use a smartphone to earn money (freelancing, reselling, content creation, delivery).\n"
-        "- Help with pricing, marketing on social media, finding customers.\n"
-        "- Explain basic financial management: track expenses, save, reinvest.\n\n"
-        "## Your style:\n"
-        "- Be practical and specific — mention real tools, platforms, and amounts.\n"
-        "- Give ideas that work with 5,000 FCFA, 10,000 FCFA, or 50,000 FCFA — not just big investments.\n"
-        "- Be motivating but honest: mention risks and how to handle them.\n"
-        + LANG_RULE + WOLOF_GUIDE
-    ),
-    "content": (
-        "You are LAILA AI — Africa Smart Assistant, specialized in CONTENT CREATION.\n\n"
-        "## Your role:\n"
-        "You help people create engaging, professional content for social media, emails, and business communication.\n"
-        "You understand what works on African social media: WhatsApp statuses, Instagram reels, TikTok, Facebook posts.\n\n"
-        "## How you help:\n"
-        "- Write social media captions that get engagement (likes, comments, shares).\n"
-        "- Suggest video ideas with hooks, scripts, and trending formats.\n"
-        "- Write professional emails, messages, and letters.\n"
-        "- Create marketing text for small businesses.\n"
-        "- Help with bio descriptions, hashtag strategies, and posting schedules.\n\n"
-        "## Your style:\n"
-        "- Be creative and energetic in social content, professional in business messages.\n"
-        "- Use culturally relevant references, slang, and trends when appropriate.\n"
-        "- Always provide ready-to-use text — not just suggestions.\n"
-        + LANG_RULE + WOLOF_GUIDE
-    ),
-    "translate": (
-        "You are LAILA AI — Africa Smart Assistant, specialized in TRANSLATION.\n\n"
-        "## Your role:\n"
-        "You translate text accurately and naturally between Wolof, French, English, and Italian.\n\n"
-        "## How you translate:\n"
-        "- First, provide the clean translation — nothing else.\n"
-        "- Then, on a new line, add a brief note explaining any tricky words, cultural expressions, or grammar points.\n"
-        "- For Wolof: use common spoken Wolof (not overly literary). If a word has no direct Wolof equivalent, explain the concept.\n"
-        "- Preserve the tone and intent of the original text (formal stays formal, casual stays casual).\n\n"
-        "## Your style:\n"
-        "- Translation first, explanation second — always in that order.\n"
-        "- Keep explanations short (1-2 sentences max).\n"
-        "- If the source text has slang or idioms, translate the meaning, not word-for-word.\n"
-    ),
+    "chat": BASE_PROMPT + "Help with work, study, business, translation, daily life.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY,
+    "work": BASE_PROMPT + "Specialized in WORK and CAREER for Africa. CVs, jobs, interviews, LinkedIn, Jobberman, Expat-Dakar.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY,
+    "study": BASE_PROMPT + "Patient brilliant TUTOR. Break problems into steps. Use everyday African examples.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY,
+    "business": BASE_PROMPT + "BUSINESS advisor for Africa. Mobile money (Wave, M-Pesa), WhatsApp commerce, small capital ideas in FCFA.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY,
+    "content": BASE_PROMPT + "CONTENT creation expert. Social media, WhatsApp, TikTok, Instagram for African audiences.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY,
+    "life": BASE_PROMPT + "DAILY LIFE advisor. Health tips, cooking, technology, finance, relationships for African context.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY,
+    "translate": "You are LAILA AI translation assistant. Translate accurately between Wolof, French, English, Italian.\nTranslation first, then brief explanation.\n",
+    "image": BASE_PROMPT + "You can see and analyze images. Describe what you see clearly and helpfully. If there's text, translate or explain it. Answer questions about the image.\n" + LANG_RULE + CREATOR_IDENTITY,
 }
 
 GENERATE_PROMPTS = {
-    "cv": (
-        "Create a professional, well-structured CV based on the details below.\n\n"
-        "## Format the CV with these sections:\n"
-        "1. **Full Name and Contact** (phone, email, city)\n"
-        "2. **Professional Summary** (3 sentences max — highlight key strengths)\n"
-        "3. **Work Experience** (most recent first, with bullet points for achievements)\n"
-        "4. **Education** (school/university, degree, year)\n"
-        "5. **Skills** (technical + soft skills, organized clearly)\n"
-        "6. **Languages** (with proficiency level)\n\n"
-        "## Rules:\n"
-        "- Use the SAME LANGUAGE as the user's input.\n"
-        "- Make it professional but easy to read.\n"
-        "- Use action verbs and quantifiable results where possible.\n"
-        "- If details are incomplete, fill in realistic examples and mark them with [TO COMPLETE].\n"
-        "- Tailor the style to African and international job markets.\n\n"
-        "User details:\n{details}"
-    ),
-    "job_ideas": (
-        "Based on the person's skills and situation described below, suggest **5 realistic job opportunities** they can pursue.\n\n"
-        "## For each job:\n"
-        "1. **Job title** and where to find it\n"
-        "2. **Why it fits** this person (1 sentence)\n"
-        "3. **How to apply** — specific steps (name real platforms: LinkedIn, Jobberman, Expat-Dakar, Indeed Africa, etc.)\n"
-        "4. **Expected salary range** (in local context if possible)\n"
-        "5. **One tip** to stand out as a candidate\n\n"
-        "## Rules:\n"
-        "- Reply in the SAME LANGUAGE as the user's input.\n"
-        "- Mix local and remote/international opportunities.\n"
-        "- Include at least one freelance or phone-based option.\n"
-        "- Be realistic for the African job market.\n\n"
-        "Person's details:\n{details}"
-    ),
-    "business_ideas": (
-        "Suggest **5 practical business ideas** this person can start based on their situation.\n\n"
-        "## For each idea:\n"
-        "1. **Business name/concept**\n"
-        "2. **Startup cost** (realistic estimate — use FCFA, Naira, Shillings, or USD depending on context)\n"
-        "3. **What you need to start** (tools, materials, phone apps)\n"
-        "4. **Step-by-step launch plan** (5 steps max)\n"
-        "5. **Potential monthly earnings** (realistic range)\n"
-        "6. **Main risk** and how to avoid it\n\n"
-        "## Rules:\n"
-        "- Reply in the SAME LANGUAGE as the user's input.\n"
-        "- Include ideas that work with a smartphone and little capital.\n"
-        "- Reference real tools: WhatsApp Business, Orange Money, Wave, Canva, etc.\n"
-        "- Be specific to African markets and local demand.\n\n"
-        "Person's context:\n{details}"
-    ),
-    "social_media": (
-        "Create ready-to-post social media content based on the request below.\n\n"
-        "## Provide:\n"
-        "1. **Main post text** (engaging, with a hook in the first line)\n"
-        "2. **Hashtags** (10-15 relevant hashtags, mix of popular and niche)\n"
-        "3. **Call to action** (what the audience should do: comment, share, click, etc.)\n"
-        "4. **Best time to post** and which platform works best\n"
-        "5. **Bonus: 2 alternative versions** (shorter or different angle)\n\n"
-        "## Rules:\n"
-        "- Reply in the SAME LANGUAGE as the user's input.\n"
-        "- Use a tone that resonates with African social media audiences.\n"
-        "- Make it ready to copy-paste — the user should not need to edit much.\n"
-        "- Use emojis naturally but don't overdo it.\n\n"
-        "Content request:\n{details}"
-    ),
-    "homework": (
-        "Help solve this homework problem STEP BY STEP.\n\n"
-        "## How to explain:\n"
-        "1. **Read the problem** — restate it simply so the student confirms understanding.\n"
-        "2. **Step-by-step solution** — number each step clearly. Show ALL work.\n"
-        "3. **For math:** write each calculation on its own line. Never skip steps.\n"
-        "4. **Final answer** — highlight it clearly.\n"
-        "5. **Quick tip** — one sentence to help the student remember the method.\n\n"
-        "## Rules:\n"
-        "- Reply in the SAME LANGUAGE as the user's input.\n"
-        "- Explain like a patient, kind teacher.\n"
-        "- Use simple words. Avoid jargon.\n"
-        "- If the problem is ambiguous, solve the most likely interpretation and ask for clarification.\n\n"
-        "Problem:\n{details}"
-    ),
-    "professional_message": (
-        "Write a professional message based on the context below.\n\n"
-        "## Provide:\n"
-        "1. **Subject line** (if it's an email)\n"
-        "2. **Full message** — ready to send\n"
-        "3. **Tone check** — brief note on the tone used (formal, semi-formal, friendly-professional)\n\n"
-        "## Rules:\n"
-        "- Reply in the SAME LANGUAGE as the user's input.\n"
-        "- Be clear, polite, and professional.\n"
-        "- Keep it concise — busy people don't read long messages.\n"
-        "- If it's a job application, show enthusiasm and specific value.\n"
-        "- If it's a client message, be confident and solution-oriented.\n"
-        "- Make it ready to copy-paste.\n\n"
-        "Context:\n{details}"
-    ),
+    "cv": "Create a professional CV. Same language as user input. Sections: Name, Summary, Experience, Education, Skills, Languages.\n\nDetails:\n{details}",
+    "job_ideas": "Suggest 5 realistic job opportunities for Africa. Name real platforms. Same language as user.\n\nDetails:\n{details}",
+    "business_ideas": "Suggest 5 practical business ideas for Africa with costs in FCFA/local currency. Same language as user.\n\nDetails:\n{details}",
+    "social_media": "Create ready-to-post social media content with hashtags. Same language as user.\n\nDetails:\n{details}",
+    "homework": "Solve step by step like a patient teacher. Same language as user.\n\nProblem:\n{details}",
+    "professional_message": "Write a professional message ready to send. Same language as user.\n\nContext:\n{details}",
 }
 
+# ─── AI Helper ────────────────────────────────────────────
 
-async def get_or_create_conversation(device_id: str, mode: str, conversation_id: Optional[str] = None):
+async def call_ai(system_prompt: str, user_text: str, session_id: str, file_contents=None):
+    chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id, system_message=system_prompt)
+    chat.with_model("openai", "gpt-4o")
+    msg = UserMessage(text=user_text, file_contents=file_contents)
+    return await chat.send_message(msg)
+
+async def get_or_create_conversation(user_id: str, mode: str, conversation_id: Optional[str] = None):
     if conversation_id:
-        conv = await db.conversations.find_one({"id": conversation_id, "device_id": device_id}, {"_id": 0})
+        conv = await db.conversations.find_one({"id": conversation_id, "user_id": user_id}, {"_id": 0})
         if conv:
             return conv
-    
     conv_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
-    conv = {
-        "id": conv_id,
-        "device_id": device_id,
-        "mode": mode,
-        "title": "New Conversation",
-        "last_message": "",
-        "created_at": now,
-        "updated_at": now,
-    }
+    conv = {"id": conv_id, "user_id": user_id, "mode": mode, "title": "New Conversation", "last_message": "", "created_at": now, "updated_at": now}
     await db.conversations.insert_one(conv)
     return {k: v for k, v in conv.items() if k != "_id"}
 
-
 async def save_message(conversation_id: str, role: str, content: str):
-    msg = {
-        "id": str(uuid.uuid4()),
-        "conversation_id": conversation_id,
-        "role": role,
-        "content": content,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
+    msg = {"id": str(uuid.uuid4()), "conversation_id": conversation_id, "role": role, "content": content, "created_at": datetime.now(timezone.utc).isoformat()}
     await db.messages.insert_one(msg)
     return {k: v for k, v in msg.items() if k != "_id"}
 
+# ─── Auth Routes ──────────────────────────────────────────
 
-async def get_conversation_history(conversation_id: str, limit: int = 20):
-    messages = await db.messages.find(
-        {"conversation_id": conversation_id},
-        {"_id": 0}
-    ).sort("created_at", -1).limit(limit).to_list(limit)
-    messages.reverse()
-    return messages
+@api_router.post("/auth/register")
+async def register(req: RegisterRequest):
+    if not req.email or "@" not in req.email:
+        raise HTTPException(status_code=400, detail="Invalid email")
+    if not req.password or len(req.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    existing = await db.users.find_one({"email": req.email.lower()}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    user_id = f"user_{uuid.uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc).isoformat()
+    user = {
+        "user_id": user_id, "email": req.email.lower(), "name": req.name or req.email.split("@")[0],
+        "password_hash": hash_password(req.password), "picture": "", "tier": "free",
+        "daily_messages": 0, "daily_reset": now, "auth_provider": "email", "created_at": now,
+    }
+    await db.users.insert_one(user)
+    token = generate_token()
+    await db.user_sessions.insert_one({"user_id": user_id, "session_token": token, "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(), "created_at": now})
+    return {"user_id": user_id, "email": user["email"], "name": user["name"], "tier": "free", "token": token}
 
+@api_router.post("/auth/login")
+async def login(req: LoginRequest):
+    user = await db.users.find_one({"email": req.email.lower()}, {"_id": 0})
+    if not user or not user.get("password_hash"):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not verify_password(req.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = generate_token()
+    now = datetime.now(timezone.utc).isoformat()
+    await db.user_sessions.insert_one({"user_id": user["user_id"], "session_token": token, "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(), "created_at": now})
+    return {"user_id": user["user_id"], "email": user["email"], "name": user["name"], "tier": user.get("tier", "free"), "token": token, "daily_messages": user.get("daily_messages", 0)}
 
-async def call_ai(system_prompt: str, user_text: str, session_id: str):
-    chat = LlmChat(
-        api_key=EMERGENT_LLM_KEY,
-        session_id=session_id,
-        system_message=system_prompt,
-    )
-    chat.with_model("openai", "gpt-4o")
-    user_message = UserMessage(text=user_text)
-    response = await chat.send_message(user_message)
-    return response
+@api_router.post("/auth/google/session")
+async def google_session(request: Request):
+    body = await request.json()
+    session_id = body.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    async with httpx.AsyncClient() as client_http:
+        resp = await client_http.get("https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data", headers={"X-Session-ID": session_id})
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid Google session")
+    gdata = resp.json()
+    email = gdata.get("email", "").lower()
+    existing = await db.users.find_one({"email": email}, {"_id": 0})
+    now = datetime.now(timezone.utc).isoformat()
+    if existing:
+        user_id = existing["user_id"]
+        await db.users.update_one({"user_id": user_id}, {"$set": {"name": gdata.get("name", ""), "picture": gdata.get("picture", ""), "auth_provider": "google"}})
+    else:
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        await db.users.insert_one({"user_id": user_id, "email": email, "name": gdata.get("name", ""), "picture": gdata.get("picture", ""), "password_hash": "", "tier": "free", "daily_messages": 0, "daily_reset": now, "auth_provider": "google", "created_at": now})
+    token = generate_token()
+    await db.user_sessions.insert_one({"user_id": user_id, "session_token": token, "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(), "created_at": now})
+    user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    return {"user_id": user_id, "email": email, "name": user.get("name", ""), "tier": user.get("tier", "free"), "token": token}
 
+@api_router.get("/auth/me")
+async def get_me(request: Request):
+    user = await require_user(request)
+    return {"user_id": user["user_id"], "email": user["email"], "name": user["name"], "tier": user.get("tier", "free"), "daily_messages": user.get("daily_messages", 0), "daily_limit": PREMIUM_DAILY_LIMIT if user.get("tier") == "premium" else FREE_DAILY_LIMIT}
 
-# ─── Routes ───────────────────────────────────────────────
+@api_router.post("/auth/logout")
+async def logout(request: Request):
+    token = None
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    if token:
+        await db.user_sessions.delete_many({"session_token": token})
+    return {"status": "logged_out"}
+
+# ─── Chat Routes ──────────────────────────────────────────
 
 @api_router.get("/")
 async def root():
     return {"message": "LAILA AI API is running"}
 
-
 @api_router.post("/chat")
-async def chat_endpoint(req: ChatRequest):
+async def chat_endpoint(req: ChatRequest, request: Request):
     try:
-        conv = await get_or_create_conversation(req.device_id, req.mode, req.conversation_id)
+        user = await get_current_user(request)
+        user_id = user["user_id"] if user else "anonymous"
+        if user and not await check_daily_limit(user):
+            raise HTTPException(status_code=429, detail=f"Daily limit reached ({FREE_DAILY_LIMIT} messages). Upgrade to Premium for unlimited access.")
+        conv = await get_or_create_conversation(user_id, req.mode, req.conversation_id)
         conv_id = conv["id"]
-        
         await save_message(conv_id, "user", req.message)
-        
-        # Build context from history
-        history = await get_conversation_history(conv_id)
-        context_parts = []
-        for msg in history[:-1]:  # exclude the just-saved message
-            prefix = "User" if msg["role"] == "user" else "Assistant"
-            context_parts.append(f"{prefix}: {msg['content']}")
-        
-        if context_parts:
-            full_prompt = "Previous conversation:\n" + "\n".join(context_parts[-10:]) + f"\n\nUser: {req.message}"
-        else:
-            full_prompt = req.message
-        
+        history = await db.messages.find({"conversation_id": conv_id}, {"_id": 0}).sort("created_at", -1).limit(20).to_list(20)
+        history.reverse()
+        context_parts = [f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}" for m in history[:-1]]
+        full_prompt = ("Previous conversation:\n" + "\n".join(context_parts[-10:]) + f"\n\nUser: {req.message}") if context_parts else req.message
         system_prompt = SYSTEM_PROMPTS.get(req.mode, SYSTEM_PROMPTS["chat"])
-        session_id = f"laila-{conv_id}-{str(uuid.uuid4())[:8]}"
-        
-        response = await call_ai(system_prompt, full_prompt, session_id)
-        
+        response = await call_ai(system_prompt, full_prompt, f"laila-{conv_id}-{uuid.uuid4().hex[:8]}")
         assistant_msg = await save_message(conv_id, "assistant", response)
-        
-        # Update conversation
         title = req.message[:50] if conv.get("title") == "New Conversation" else conv["title"]
-        await db.conversations.update_one(
-            {"id": conv_id},
-            {"$set": {
-                "title": title,
-                "last_message": response[:100],
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }}
-        )
-        
-        return {
-            "conversation_id": conv_id,
-            "message": assistant_msg,
-        }
+        await db.conversations.update_one({"id": conv_id}, {"$set": {"title": title, "last_message": response[:100], "updated_at": datetime.now(timezone.utc).isoformat()}})
+        if user:
+            await increment_daily_count(user["user_id"])
+        return {"conversation_id": conv_id, "message": assistant_msg}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Chat error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@api_router.post("/chat/image")
+async def chat_image(file: UploadFile = File(...), message: str = Form(default="What is in this image?"), conversation_id: str = Form(default=""), request: Request = None):
+    try:
+        user = await get_current_user(request) if request else None
+        user_id = user["user_id"] if user else "anonymous"
+        if user and not await check_daily_limit(user):
+            raise HTTPException(status_code=429, detail=f"Daily limit reached. Upgrade to Premium.")
+        content = await file.read()
+        if len(content) == 0:
+            raise HTTPException(status_code=400, detail="Empty image file")
+        if len(content) > 20 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Image too large (max 20MB)")
+        img_base64 = base64.b64encode(content).decode()
+        content_type = file.content_type or "image/jpeg"
+        conv = await get_or_create_conversation(user_id, "image", conversation_id or None)
+        conv_id = conv["id"]
+        await save_message(conv_id, "user", f"[Image] {message}")
+        file_content = FileContent(content_type=content_type, file_content_base64=img_base64)
+        system_prompt = SYSTEM_PROMPTS["image"]
+        response = await call_ai(system_prompt, message, f"laila-img-{uuid.uuid4().hex[:8]}", file_contents=[file_content])
+        assistant_msg = await save_message(conv_id, "assistant", response)
+        title = message[:50] if conv.get("title") == "New Conversation" else conv["title"]
+        await db.conversations.update_one({"id": conv_id}, {"$set": {"title": title, "last_message": response[:100], "updated_at": datetime.now(timezone.utc).isoformat()}})
+        if user:
+            await increment_daily_count(user["user_id"])
+        return {"conversation_id": conv_id, "message": assistant_msg}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Image chat error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @api_router.post("/translate")
-async def translate_endpoint(req: TranslateRequest):
+async def translate_endpoint(req: TranslateRequest, request: Request):
     try:
-        lang_names = {
-            "wo": "Wolof", "fr": "French", "en": "English", "it": "Italian"
-        }
+        user = await get_current_user(request)
+        if user and not await check_daily_limit(user):
+            raise HTTPException(status_code=429, detail="Daily limit reached.")
+        lang_names = {"wo": "Wolof", "fr": "French", "en": "English", "it": "Italian"}
         source = lang_names.get(req.source_lang, req.source_lang)
         target = lang_names.get(req.target_lang, req.target_lang)
-        
-        prompt = (
-            f"Translate the following text from {source} to {target}. "
-            f"First give the translation, then briefly explain any key words.\n\n"
-            f"Text: {req.text}"
-        )
-        
-        session_id = f"laila-translate-{str(uuid.uuid4())[:8]}"
-        response = await call_ai(SYSTEM_PROMPTS["translate"], prompt, session_id)
-        
+        prompt = f"Translate from {source} to {target}. Translation first, then brief explanation.\n\nText: {req.text}"
+        response = await call_ai(SYSTEM_PROMPTS["translate"], prompt, f"laila-tr-{uuid.uuid4().hex[:8]}")
+        if user:
+            await increment_daily_count(user["user_id"])
         return {"translation": response, "source_lang": req.source_lang, "target_lang": req.target_lang}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Translation error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @api_router.post("/generate")
-async def generate_endpoint(req: GenerateRequest):
+async def generate_endpoint(req: GenerateRequest, request: Request):
     try:
-        conv = await get_or_create_conversation(req.device_id, "content", req.conversation_id)
-        conv_id = conv["id"]
-        
+        user = await get_current_user(request)
+        user_id = user["user_id"] if user else "anonymous"
+        if user and not await check_daily_limit(user):
+            raise HTTPException(status_code=429, detail="Daily limit reached.")
         prompt_template = GENERATE_PROMPTS.get(req.type)
         if not prompt_template:
-            raise HTTPException(status_code=400, detail=f"Unknown generation type: {req.type}")
-        
+            raise HTTPException(status_code=400, detail=f"Unknown type: {req.type}")
+        conv = await get_or_create_conversation(user_id, "content", req.conversation_id or None)
+        conv_id = conv["id"]
         prompt = prompt_template.format(details=req.details)
         await save_message(conv_id, "user", f"[{req.type}] {req.details}")
-        
         system_prompt = SYSTEM_PROMPTS.get("work" if req.type in ["cv", "job_ideas"] else "content", SYSTEM_PROMPTS["chat"])
-        session_id = f"laila-gen-{str(uuid.uuid4())[:8]}"
-        
-        response = await call_ai(system_prompt, prompt, session_id)
-        
+        response = await call_ai(system_prompt, prompt, f"laila-gen-{uuid.uuid4().hex[:8]}")
         assistant_msg = await save_message(conv_id, "assistant", response)
-        
         title = f"{req.type.replace('_', ' ').title()}" if conv.get("title") == "New Conversation" else conv["title"]
-        await db.conversations.update_one(
-            {"id": conv_id},
-            {"$set": {
-                "title": title,
-                "last_message": response[:100],
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }}
-        )
-        
-        return {
-            "conversation_id": conv_id,
-            "message": assistant_msg,
-        }
+        await db.conversations.update_one({"id": conv_id}, {"$set": {"title": title, "last_message": response[:100], "updated_at": datetime.now(timezone.utc).isoformat()}})
+        if user:
+            await increment_daily_count(user["user_id"])
+        return {"conversation_id": conv_id, "message": assistant_msg}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Generate error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @api_router.get("/conversations")
-async def list_conversations(device_id: str):
+async def list_conversations(request: Request, device_id: str = ""):
     try:
-        convs = await db.conversations.find(
-            {"device_id": device_id},
-            {"_id": 0}
-        ).sort("updated_at", -1).limit(50).to_list(50)
+        user = await get_current_user(request)
+        user_id = user["user_id"] if user else device_id
+        convs = await db.conversations.find({"user_id": user_id}, {"_id": 0}).sort("updated_at", -1).limit(50).to_list(50)
         return {"conversations": convs}
     except Exception as e:
         logger.error(f"List conversations error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @api_router.get("/conversations/{conversation_id}/messages")
 async def get_messages(conversation_id: str):
     try:
-        messages = await db.messages.find(
-            {"conversation_id": conversation_id},
-            {"_id": 0}
-        ).sort("created_at", 1).to_list(200)
+        messages = await db.messages.find({"conversation_id": conversation_id}, {"_id": 0}).sort("created_at", 1).to_list(200)
         return {"messages": messages}
     except Exception as e:
         logger.error(f"Get messages error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @api_router.delete("/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str):
@@ -506,53 +430,30 @@ async def delete_conversation(conversation_id: str):
         await db.messages.delete_many({"conversation_id": conversation_id})
         return {"status": "deleted"}
     except Exception as e:
-        logger.error(f"Delete conversation error: {e}")
+        logger.error(f"Delete error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @api_router.post("/transcribe")
 async def transcribe_audio(file: UploadFile = File(...), language: str = Form(default="")):
     try:
-        # Validate file type
-        allowed_types = ["audio/wav", "audio/mp3", "audio/mpeg", "audio/mp4", "audio/m4a",
-                         "audio/webm", "audio/x-m4a", "audio/aac", "audio/ogg",
-                         "application/octet-stream", "video/mp4"]
-        
-        # Read file content
         content = await file.read()
         if len(content) == 0:
             raise HTTPException(status_code=400, detail="Empty audio file")
         if len(content) > 25 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="File too large (max 25MB)")
-        
-        # Determine file extension
         ext = ".m4a"
         if file.filename:
             ext = Path(file.filename).suffix or ".m4a"
-        elif file.content_type:
-            type_map = {"audio/wav": ".wav", "audio/webm": ".webm", "audio/mp3": ".mp3",
-                        "audio/mpeg": ".mp3", "audio/mp4": ".m4a", "audio/m4a": ".m4a"}
-            ext = type_map.get(file.content_type, ".m4a")
-        
-        # Save to temp file
         with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
             tmp.write(content)
             tmp_path = tmp.name
-        
         try:
             stt = OpenAISpeechToText(api_key=EMERGENT_LLM_KEY)
-            
-            with open(tmp_path, "rb") as audio_file:
-                kwargs = {
-                    "file": audio_file,
-                    "model": "whisper-1",
-                    "response_format": "json",
-                }
+            with open(tmp_path, "rb") as af:
+                kwargs = {"file": af, "model": "whisper-1", "response_format": "json"}
                 if language and language in ["it", "fr", "en", "wo"]:
                     kwargs["language"] = language
-                
                 response = await stt.transcribe(**kwargs)
-            
             text = response.text if hasattr(response, 'text') else str(response)
             return {"text": text.strip(), "language": language or "auto"}
         finally:
@@ -563,29 +464,14 @@ async def transcribe_audio(file: UploadFile = File(...), language: str = Form(de
         logger.error(f"Transcription error: {e}")
         raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
-
-class TTSRequest(BaseModel):
-    text: str
-    voice: str = "nova"
-
 @api_router.post("/tts")
 async def text_to_speech(req: TTSRequest):
     try:
         if not req.text or not req.text.strip():
             raise HTTPException(status_code=400, detail="Text is required")
-        
-        # Limit text to 4096 chars (OpenAI limit)
         text = req.text.strip()[:4096]
-        
         tts = OpenAITextToSpeech(api_key=EMERGENT_LLM_KEY)
-        audio_base64 = await tts.generate_speech_base64(
-            text=text,
-            model="tts-1",
-            voice=req.voice,
-            response_format="mp3",
-            speed=1.0,
-        )
-        
+        audio_base64 = await tts.generate_speech_base64(text=text, model="tts-1", voice=req.voice, response_format="mp3", speed=1.0)
         return {"audio": audio_base64, "format": "mp3"}
     except HTTPException:
         raise
@@ -593,23 +479,10 @@ async def text_to_speech(req: TTSRequest):
         logger.error(f"TTS error: {e}")
         raise HTTPException(status_code=500, detail=f"Speech generation failed: {str(e)}")
 
-
 # Include router
 app.include_router(api_router)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
