@@ -142,8 +142,19 @@ class SettingsUpdate(BaseModel):
     preferred_language: Optional[str] = None
     voice_enabled: Optional[bool] = None
     tts_enabled: Optional[bool] = None
+    tts_voice: Optional[str] = None
     memory_enabled: Optional[bool] = None
     theme: Optional[str] = None
+
+class ReferralApplyRequest(BaseModel):
+    referral_code: str
+
+# Voice styles
+VOICE_STYLES = [
+    {"id": "nova", "name": "Nova", "desc": "Warm female voice", "gender": "female"},
+    {"id": "onyx", "name": "Onyx", "desc": "Strong male voice", "gender": "male"},
+    {"id": "alloy", "name": "Alloy", "desc": "Smart neutral voice", "gender": "neutral"},
+]
 
 # ─── System Prompts ───────────────────────────────────────
 
@@ -230,9 +241,9 @@ SYSTEM_PROMPTS = {
 }
 
 GENERATE_PROMPTS = {
-    "cv": "Create a professional CV. Same language as user input. Sections: Name, Summary, Experience, Education, Skills, Languages.\n\nDetails:\n{details}",
-    "job_ideas": "Suggest 5 realistic job opportunities for Africa. Name real platforms. Same language as user.\n\nDetails:\n{details}",
-    "business_ideas": "Suggest 5 practical business ideas for Africa with costs in FCFA/local currency. Same language as user.\n\nDetails:\n{details}",
+    "cv": "Create a POWERFUL, professional CV that gets interviews. Same language as user.\n\nSections: Name & Contact, Professional Summary (3 punchy sentences), Work Experience (action verbs + results), Education, Skills (hard + soft), Languages.\nIf details are missing, add realistic placeholders marked [COMPLETE THIS].\nTailor for African + international job markets. Make it stand out.\n\nDetails:\n{details}",
+    "job_ideas": "Suggest 5 REALISTIC job opportunities this person can get NOW.\n\nFor each: Job title, Where to apply (name REAL platforms: LinkedIn, Jobberman, Expat-Dakar, Indeed, Glassdoor, local WhatsApp groups), Expected salary range (local currency), One tip to stand out.\nInclude at least 1 remote/freelance option. Same language as user.\n\nDetails:\n{details}",
+    "business_ideas": "Suggest 5 PRACTICAL business ideas for Africa.\n\nFor each: Business concept, Startup cost (realistic in FCFA/local), What you need (tools, phone apps: WhatsApp Business, Canva, Wave, M-Pesa), 5-step launch plan, Monthly earning potential, Main risk + how to avoid it.\nInclude ideas starting from 5000 FCFA. Same language as user.\n\nDetails:\n{details}",
     "social_media": "Create ready-to-post social media content with hashtags. Same language as user.\n\nDetails:\n{details}",
     "homework": "Solve step by step like a patient teacher. Same language as user.\n\nProblem:\n{details}",
     "professional_message": "Write a professional message ready to send. Same language as user.\n\nContext:\n{details}",
@@ -274,11 +285,13 @@ async def register(req: RegisterRequest):
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
     user_id = f"user_{uuid.uuid4().hex[:12]}"
+    referral_code = f"LAILA-{req.name.upper()[:6] if req.name else 'USER'}-{uuid.uuid4().hex[:4].upper()}"
     now = datetime.now(timezone.utc).isoformat()
     user = {
         "user_id": user_id, "email": req.email.lower(), "name": req.name or req.email.split("@")[0],
         "password_hash": hash_password(req.password), "picture": "", "tier": "free",
         "daily_messages": 0, "daily_reset": now, "auth_provider": "email", "created_at": now,
+        "referral_code": referral_code, "referred_by": "", "referral_count": 0, "referral_bonus_days": 0,
     }
     await db.users.insert_one(user)
     token = generate_token()
@@ -325,7 +338,16 @@ async def google_session(request: Request):
 @api_router.get("/auth/me")
 async def get_me(request: Request):
     user = await require_user(request)
-    return {"user_id": user["user_id"], "email": user["email"], "name": user["name"], "tier": user.get("tier", "free"), "daily_messages": user.get("daily_messages", 0), "daily_limit": PREMIUM_DAILY_LIMIT if user.get("tier") == "premium" else FREE_DAILY_LIMIT}
+    tier = user.get("tier", "free")
+    tier_label = "VIP" if user.get("referral_count", 0) >= 10 and tier == "premium" else tier.upper()
+    return {
+        "user_id": user["user_id"], "email": user["email"], "name": user["name"],
+        "tier": tier, "tier_label": tier_label,
+        "daily_messages": user.get("daily_messages", 0),
+        "daily_limit": PREMIUM_DAILY_LIMIT if tier == "premium" else FREE_DAILY_LIMIT,
+        "referral_code": user.get("referral_code", ""),
+        "referral_count": user.get("referral_count", 0),
+    }
 
 @api_router.post("/auth/logout")
 async def logout(request: Request):
@@ -632,6 +654,61 @@ async def payment_history(request: Request):
     payments = await db.payments.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).limit(20).to_list(20)
     return {"payments": payments}
 
+# ─── Referral Routes ──────────────────────────────────────
+
+@api_router.get("/referral")
+async def get_referral_info(request: Request):
+    user = await require_user(request)
+    # Generate referral code if missing
+    if not user.get("referral_code"):
+        code = f"LAILA-{(user.get('name', 'USER'))[:6].upper()}-{uuid.uuid4().hex[:4].upper()}"
+        await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"referral_code": code, "referral_count": 0, "referral_bonus_days": 0}})
+        user["referral_code"] = code
+    share_link = f"https://laila-ai.app/join?ref={user.get('referral_code', '')}"
+    return {
+        "referral_code": user.get("referral_code", ""),
+        "share_link": share_link,
+        "referral_count": user.get("referral_count", 0),
+        "bonus_days_earned": user.get("referral_bonus_days", 0),
+        "rewards": [
+            {"friends": 1, "reward": "3 days free Premium"},
+            {"friends": 3, "reward": "7 days free Premium"},
+            {"friends": 5, "reward": "14 days free Premium"},
+            {"friends": 10, "reward": "30 days free Premium + VIP badge"},
+        ]
+    }
+
+@api_router.post("/referral/apply")
+async def apply_referral(req: ReferralApplyRequest, request: Request):
+    user = await require_user(request)
+    if user.get("referred_by"):
+        raise HTTPException(status_code=400, detail="You have already used a referral code")
+    if req.referral_code == user.get("referral_code"):
+        raise HTTPException(status_code=400, detail="Cannot use your own referral code")
+    referrer = await db.users.find_one({"referral_code": req.referral_code}, {"_id": 0})
+    if not referrer:
+        raise HTTPException(status_code=404, detail="Invalid referral code")
+    # Mark this user as referred
+    await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"referred_by": req.referral_code}})
+    # Reward referrer
+    new_count = referrer.get("referral_count", 0) + 1
+    bonus = 3  # days
+    if new_count >= 10: bonus = 30
+    elif new_count >= 5: bonus = 14
+    elif new_count >= 3: bonus = 7
+    await db.users.update_one(
+        {"user_id": referrer["user_id"]},
+        {"$inc": {"referral_count": 1, "referral_bonus_days": bonus},
+         "$set": {"tier": "premium" if new_count >= 1 else referrer.get("tier", "free")}}
+    )
+    return {"status": "applied", "referrer_name": referrer.get("name", ""), "bonus_for_referrer": f"{bonus} days premium"}
+
+# ─── Voice Styles Route ──────────────────────────────────
+
+@api_router.get("/voices")
+async def get_voices():
+    return {"voices": VOICE_STYLES}
+
 # ─── Memory Routes ────────────────────────────────────────
 
 async def get_user_memories(user_id: str) -> dict:
@@ -679,7 +756,7 @@ async def delete_memory(key: str, request: Request):
 async def get_settings(request: Request):
     user = await require_user(request)
     settings = await db.user_settings.find_one({"user_id": user["user_id"]}, {"_id": 0})
-    defaults = {"preferred_language": "auto", "voice_enabled": True, "tts_enabled": True, "memory_enabled": True, "theme": "dark"}
+    defaults = {"preferred_language": "auto", "voice_enabled": True, "tts_enabled": True, "tts_voice": "nova", "memory_enabled": True, "theme": "dark"}
     if settings:
         defaults.update({k: v for k, v in settings.items() if k not in ["user_id", "updated_at"]})
     return defaults
@@ -692,7 +769,7 @@ async def update_settings(req: SettingsUpdate, request: Request):
         updates["updated_at"] = datetime.now(timezone.utc).isoformat()
         await db.user_settings.update_one({"user_id": user["user_id"]}, {"$set": updates}, upsert=True)
     settings = await db.user_settings.find_one({"user_id": user["user_id"]}, {"_id": 0})
-    defaults = {"preferred_language": "auto", "voice_enabled": True, "tts_enabled": True, "memory_enabled": True, "theme": "dark"}
+    defaults = {"preferred_language": "auto", "voice_enabled": True, "tts_enabled": True, "tts_voice": "nova", "memory_enabled": True, "theme": "dark"}
     if settings:
         defaults.update({k: v for k, v in settings.items() if k not in ["user_id", "updated_at"]})
     return defaults
