@@ -139,6 +139,7 @@ export default function RootLayout() {
         <Tabs.Screen name="history" options={{ title: 'History', tabBarIcon: HistoryIcon, tabBarTestID: 'bottom-nav-history' }} />
         <Tabs.Screen name="settings" options={{ title: 'Settings', tabBarIcon: SettingsIcon, tabBarTestID: 'bottom-nav-settings' }} />
         <Tabs.Screen name="premium" options={{ href: null }} />
+        <Tabs.Screen name="call" options={{ href: null }} />
       </Tabs>
     </>
   );

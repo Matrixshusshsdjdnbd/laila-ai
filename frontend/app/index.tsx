@@ -8,6 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useRouter } from 'expo-router';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
@@ -65,6 +66,7 @@ export default function ChatScreen() {
   const recordingRef = useRef<Audio.Recording | null>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
   const durationInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+  const router = useRouter();
 
   React.useEffect(() => {
     AsyncStorage.getItem('laila_auth_token').then(t => setAuthToken(t));
@@ -425,6 +427,13 @@ export default function ChatScreen() {
       <Text style={styles.emptyTitle}>LAILA AI</Text>
       <Text style={styles.emptySubtitle}>Africa Smart Assistant</Text>
       <Text style={styles.emptyDesc}>Your AI assistant for work, study, business, and daily life in Africa.</Text>
+
+      <TouchableOpacity testID="call-banner-btn" style={styles.callBanner} onPress={() => router.push('/call')} activeOpacity={0.8}>
+        <View style={styles.callBannerIcon}><Ionicons name="call" size={22} color={COLORS.white} /></View>
+        <View style={styles.callBannerInfo}><Text style={styles.callBannerTitle}>Talk to LAILA</Text><Text style={styles.callBannerDesc}>Voice conversation</Text></View>
+        <Ionicons name="arrow-forward" size={18} color="#22C55E" />
+      </TouchableOpacity>
+
       <View style={styles.quickGrid}>
         {QUICK_ACTIONS.map((action) => (
           <TouchableOpacity key={action.id} testID={`quick-action-${action.id}`}
@@ -465,6 +474,9 @@ export default function ChatScreen() {
         </View>
         <TouchableOpacity testID="new-chat-btn" onPress={startNewChat} style={styles.newChatBtn}>
           <Ionicons name="add-circle-outline" size={28} color={COLORS.primary} />
+        </TouchableOpacity>
+        <TouchableOpacity testID="call-laila-btn" onPress={() => router.push('/call')} style={styles.callHeaderBtn}>
+          <Ionicons name="call" size={22} color={COLORS.success} />
         </TouchableOpacity>
       </View>
 
@@ -561,6 +573,7 @@ const styles = StyleSheet.create({
   statusDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#22C55E' },
   headerSub: { fontSize: 12, color: '#22C55E' },
   newChatBtn: { padding: 8 },
+  callHeaderBtn: { padding: 8, backgroundColor: 'rgba(34, 197, 94, 0.12)', borderRadius: 16 },
   emptyList: { flexGrow: 1, justifyContent: 'center' },
   msgList: { paddingHorizontal: 16, paddingVertical: 12, paddingBottom: 8 },
   emptyContainer: { alignItems: 'center', paddingHorizontal: 24 },
@@ -568,7 +581,12 @@ const styles = StyleSheet.create({
   logoText: { fontSize: 32, fontWeight: '800', color: COLORS.primaryDark },
   emptyTitle: { fontSize: 26, fontWeight: '800', color: COLORS.white, marginBottom: 2 },
   emptySubtitle: { fontSize: 13, color: COLORS.secondaryFg, marginBottom: 12, letterSpacing: 1 },
-  emptyDesc: { fontSize: 14, color: COLORS.mutedFg, textAlign: 'center', lineHeight: 20, marginBottom: 24 },
+  emptyDesc: { fontSize: 14, color: COLORS.mutedFg, textAlign: 'center', lineHeight: 20, marginBottom: 16 },
+  callBanner: { flexDirection: 'row', alignItems: 'center', width: '100%', backgroundColor: 'rgba(34, 197, 94, 0.08)', borderRadius: 14, padding: 14, marginBottom: 20, borderWidth: 1, borderColor: 'rgba(34, 197, 94, 0.2)', gap: 12 },
+  callBannerIcon: { width: 44, height: 44, borderRadius: 22, backgroundColor: '#22C55E', alignItems: 'center', justifyContent: 'center' },
+  callBannerInfo: { flex: 1 },
+  callBannerTitle: { fontSize: 16, fontWeight: '700', color: COLORS.white },
+  callBannerDesc: { fontSize: 12, color: '#22C55E', marginTop: 2 },
   quickGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, justifyContent: 'center', width: '100%', marginBottom: 24 },
   quickCard: { width: '47%', backgroundColor: COLORS.card, borderRadius: 14, paddingVertical: 14, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 10, borderWidth: 0.5 },
   quickIconWrap: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
