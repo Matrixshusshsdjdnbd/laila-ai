@@ -21,6 +21,7 @@ function ChatIcon({ color }: { color: string }) { return <Ionicons name="chatbub
 function TranslateIcon({ color }: { color: string }) { return <Ionicons name="language" size={24} color={color} />; }
 function AssistantsIcon({ color }: { color: string }) { return <Ionicons name="grid" size={24} color={color} />; }
 function PremiumIcon({ color }: { color: string }) { return <Ionicons name="star" size={24} color={color} />; }
+function SettingsIcon({ color }: { color: string }) { return <Ionicons name="settings-sharp" size={24} color={color} />; }
 function HistoryIcon({ color }: { color: string }) { return <Ionicons name="time" size={24} color={color} />; }
 
 // Simple onboarding slides
@@ -135,8 +136,9 @@ export default function RootLayout() {
         <Tabs.Screen name="index" options={{ title: 'Chat', tabBarIcon: ChatIcon, tabBarTestID: 'bottom-nav-chat' }} />
         <Tabs.Screen name="translate" options={{ title: 'Translate', tabBarIcon: TranslateIcon, tabBarTestID: 'bottom-nav-translate' }} />
         <Tabs.Screen name="assistants" options={{ title: 'Assistants', tabBarIcon: AssistantsIcon, tabBarTestID: 'bottom-nav-assistants' }} />
-        <Tabs.Screen name="premium" options={{ title: 'Premium', tabBarIcon: PremiumIcon, tabBarTestID: 'bottom-nav-premium' }} />
         <Tabs.Screen name="history" options={{ title: 'History', tabBarIcon: HistoryIcon, tabBarTestID: 'bottom-nav-history' }} />
+        <Tabs.Screen name="settings" options={{ title: 'Settings', tabBarIcon: SettingsIcon, tabBarTestID: 'bottom-nav-settings' }} />
+        <Tabs.Screen name="premium" options={{ href: null }} />
       </Tabs>
     </>
   );

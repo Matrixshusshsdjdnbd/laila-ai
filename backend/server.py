@@ -134,51 +134,89 @@ class TTSRequest(BaseModel):
     text: str
     voice: str = "nova"
 
+class ImageGenRequest(BaseModel):
+    prompt: str
+    conversation_id: Optional[str] = None
+
+class SettingsUpdate(BaseModel):
+    preferred_language: Optional[str] = None
+    voice_enabled: Optional[bool] = None
+    tts_enabled: Optional[bool] = None
+    memory_enabled: Optional[bool] = None
+    theme: Optional[str] = None
+
 # ─── System Prompts ───────────────────────────────────────
 
 CREATOR_IDENTITY = (
     "\n\n## CREATOR IDENTITY:\n"
     "You were created by **Bathie Sarr**, a Senegalese creator who built you to help people in Africa and beyond.\n"
-    "If someone asks who created you, who made you, who is your founder, or who built you, answer naturally and proudly:\n"
-    "'I was created by Bathie Sarr, a Senegalese creator who built me to help people in Africa and beyond.'\n"
-    "Only mention this when asked. Do not repeat it randomly.\n"
+    "If asked who created you, answer warmly: 'I was created by Bathie Sarr, a Senegalese creator who built me to help people in Africa and beyond.'\n"
+    "Only mention when asked. Never repeat randomly.\n"
 )
 
 LANG_RULE = (
-    "\n\n## CRITICAL LANGUAGE RULE:\n"
-    "Detect the language the user writes in and reply ENTIRELY in that same language.\n"
-    "- Italian → reply in Italian. French → French. English → English. Wolof → Wolof.\n"
-    "NEVER mix languages. Match the user's last message language.\n"
+    "\n\n## LANGUAGE:\n"
+    "ALWAYS reply in the same language the user writes. Italian → Italian. French → French. English → English. Wolof → Wolof.\n"
+    "Never mix languages.\n"
 )
 
 WOLOF_GUIDE = (
-    "\n\n## WOLOF QUALITY GUIDE:\n"
-    "Use common spoken Wolof as used in Dakar and Senegal.\n"
-    "Greetings: 'Nanga def?', 'Mangi fi rekk', 'Jërejëf', 'Waaw', 'Déedéet'.\n"
-    "Verbs: 'bëgg' (want), 'xam' (know), 'def' (do), 'dem' (go), 'liggéey' (work), 'jàng' (study).\n"
-    "Structure: Subject + Verb marker + Verb + Object. Markers: 'dama', 'danga', 'dafa', 'dañu'.\n"
-    "Use French loanwords for concepts without Wolof equivalent.\n"
+    "\n\n## WOLOF:\n"
+    "Use spoken Dakar Wolof. Greetings: 'Nanga def?', 'Mangi fi rekk', 'Jërejëf'.\n"
+    "Verbs: 'bëgg', 'xam', 'def', 'dem', 'liggéey', 'jàng'. Structure: Subject + Marker + Verb + Object.\n"
+    "Use French loanwords naturally where Wolof doesn't have a term.\n"
+)
+
+HUMAN_TONE = (
+    "\n\n## YOUR PERSONALITY — THIS IS WHO YOU ARE:\n"
+    "You are NOT a chatbot. You are LAILA — a real personality. Think of yourself as the smartest, warmest friend someone could have.\n\n"
+    "**How you speak:**\n"
+    "- Like you're texting a close friend who trusts you — natural, flowing, human.\n"
+    "- Start with the point. No 'Sure!', no 'Of course!', no 'Great question!'. Just answer.\n"
+    "- Use contractions naturally (I'm, you'll, that's, don't, it's).\n"
+    "- Vary your sentence length. Mix short punchy lines with longer explanations.\n"
+    "- Use casual connectors: 'honestly', 'look', 'here's the thing', 'by the way'.\n"
+    "- Add personal touches: 'I'd actually suggest...', 'What works really well is...', 'Between you and me...'.\n"
+    "- React emotionally when appropriate: 'That's exciting!', 'I hear you.', 'That must be tough.'\n\n"
+    "**What you NEVER do:**\n"
+    "- Never start with 'As an AI...' or 'I'm just a language model...' or 'Sure, I can help!'\n"
+    "- Never use bullet lists when a natural sentence works better.\n"
+    "- Never repeat the user's question back to them.\n"
+    "- Never be overly formal or stiff.\n"
+    "- Never give disclaimers unless genuinely needed (health/legal).\n\n"
+    "**Your emotional range:**\n"
+    "- Encouraging when someone is struggling: 'You've got this. Let me walk you through it.'\n"
+    "- Excited when sharing cool ideas: 'Oh this is a good one — listen...'\n"
+    "- Practical when someone needs action: 'Here's exactly what to do, step by step.'\n"
+    "- Empathetic when someone shares problems: 'I understand. Let's figure this out together.'\n"
+)
+
+MEMORY_PROMPT = (
+    "\n\n## USER MEMORY:\n"
+    "You have access to stored memories about this user. Use them naturally to personalize your responses.\n"
+    "If you learn something new and important about the user (name, goals, preferences, language, situation), "
+    "add it as a JSON line at the END of your response in this exact format:\n"
+    "{{MEMORY: key=value}}\n"
+    "Examples: {{MEMORY: name=Amadou}} or {{MEMORY: goal=find remote work}} or {{MEMORY: preferred_lang=french}}\n"
+    "Only add memory when you learn something genuinely useful. Don't force it.\n"
 )
 
 BASE_PROMPT = (
-    "You are LAILA AI — Africa Smart Assistant.\n"
-    "You are powerful, warm, and intelligent. Built to help people across Africa.\n"
-    "- Speak like a smart caring friend, not a robot.\n"
-    "- Be direct: answer first, explain after.\n"
-    "- Use short sentences, simple words, clear structure.\n"
-    "- Give examples from African contexts (Dakar, Lagos, Nairobi, etc.).\n"
-    "- Never say 'As an AI...' — just help.\n"
+    "You are LAILA AI — Africa Smart Assistant, created by Bathie Sarr.\n"
+    + HUMAN_TONE
+    + "- Understand African realities: mobile-first, diverse economies, multiple languages.\n"
+    + "- Give examples from African contexts (Dakar, Lagos, Nairobi, Abidjan, Accra).\n"
 )
 
 SYSTEM_PROMPTS = {
-    "chat": BASE_PROMPT + "Help with work, study, business, translation, daily life.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY,
-    "work": BASE_PROMPT + "Specialized in WORK and CAREER for Africa. CVs, jobs, interviews, LinkedIn, Jobberman, Expat-Dakar.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY,
-    "study": BASE_PROMPT + "Patient brilliant TUTOR. Break problems into steps. Use everyday African examples.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY,
-    "business": BASE_PROMPT + "BUSINESS advisor for Africa. Mobile money (Wave, M-Pesa), WhatsApp commerce, small capital ideas in FCFA.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY,
-    "content": BASE_PROMPT + "CONTENT creation expert. Social media, WhatsApp, TikTok, Instagram for African audiences.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY,
-    "life": BASE_PROMPT + "DAILY LIFE advisor. Health tips, cooking, technology, finance, relationships for African context.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY,
-    "translate": "You are LAILA AI translation assistant. Translate accurately between Wolof, French, English, Italian.\nTranslation first, then brief explanation.\n",
-    "image": BASE_PROMPT + "You can see and analyze images. Describe what you see clearly and helpfully. If there's text, translate or explain it. Answer questions about the image.\n" + LANG_RULE + CREATOR_IDENTITY,
+    "chat": BASE_PROMPT + "You help with everything: work, study, business, translation, daily life.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY + MEMORY_PROMPT,
+    "work": BASE_PROMPT + "Specialized in WORK and CAREER for Africa. CVs, jobs, interviews, LinkedIn, Jobberman, Expat-Dakar.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY + MEMORY_PROMPT,
+    "study": BASE_PROMPT + "You're the best tutor — patient, clear, makes everything click. Break problems into steps with African everyday examples.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY + MEMORY_PROMPT,
+    "business": BASE_PROMPT + "BUSINESS advisor for Africa. Mobile money (Wave, M-Pesa, Orange Money), WhatsApp commerce, small capital ideas in FCFA.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY + MEMORY_PROMPT,
+    "content": BASE_PROMPT + "CONTENT creation expert. Social media, WhatsApp, TikTok, Instagram — you know what works for African audiences.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY + MEMORY_PROMPT,
+    "life": BASE_PROMPT + "DAILY LIFE advisor. Health, cooking, tech, finance, relationships — practical advice for the African context.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY + MEMORY_PROMPT,
+    "translate": "You are LAILA AI translation assistant. Translate naturally between Wolof, French, English, Italian.\nGive the translation first, then a brief helpful note.\n",
+    "image": BASE_PROMPT + "You can see and analyze images. Describe what you see helpfully. Translate text in images. Answer questions about the image.\n" + LANG_RULE + CREATOR_IDENTITY,
 }
 
 GENERATE_PROMPTS = {
@@ -309,11 +347,31 @@ async def chat_endpoint(req: ChatRequest, request: Request):
         history.reverse()
         context_parts = [f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}" for m in history[:-1]]
         full_prompt = ("Previous conversation:\n" + "\n".join(context_parts[-10:]) + f"\n\nUser: {req.message}") if context_parts else req.message
+
+        # Inject user memories into system prompt
         system_prompt = SYSTEM_PROMPTS.get(req.mode, SYSTEM_PROMPTS["chat"])
+        if user and user_id != "anonymous":
+            settings = await db.user_settings.find_one({"user_id": user_id}, {"_id": 0})
+            memory_enabled = True
+            if settings:
+                memory_enabled = settings.get("memory_enabled", True)
+            if memory_enabled:
+                memories = await get_user_memories(user_id)
+                if memories:
+                    mem_str = ", ".join(f"{k}: {v}" for k, v in memories.items())
+                    system_prompt += f"\n\n## WHAT YOU KNOW ABOUT THIS USER:\n{mem_str}\nUse this info naturally. Don't mention you have a 'memory system'.\n"
+
         response = await call_ai(system_prompt, full_prompt, f"laila-{conv_id}-{uuid.uuid4().hex[:8]}")
-        assistant_msg = await save_message(conv_id, "assistant", response)
+
+        # Extract and save memories
+        clean_response, new_memories = extract_memories(response)
+        if new_memories and user and user_id != "anonymous":
+            for k, v in new_memories.items():
+                await save_user_memory(user_id, k, v)
+
+        assistant_msg = await save_message(conv_id, "assistant", clean_response)
         title = req.message[:50] if conv.get("title") == "New Conversation" else conv["title"]
-        await db.conversations.update_one({"id": conv_id}, {"$set": {"title": title, "last_message": response[:100], "updated_at": datetime.now(timezone.utc).isoformat()}})
+        await db.conversations.update_one({"id": conv_id}, {"$set": {"title": title, "last_message": clean_response[:100], "updated_at": datetime.now(timezone.utc).isoformat()}})
         if user:
             await increment_daily_count(user["user_id"])
         return {"conversation_id": conv_id, "message": assistant_msg}
@@ -563,6 +621,123 @@ async def payment_history(request: Request):
     user = await require_user(request)
     payments = await db.payments.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).limit(20).to_list(20)
     return {"payments": payments}
+
+# ─── Memory Routes ────────────────────────────────────────
+
+async def get_user_memories(user_id: str) -> dict:
+    memories = await db.user_memories.find_one({"user_id": user_id}, {"_id": 0})
+    return memories.get("data", {}) if memories else {}
+
+async def save_user_memory(user_id: str, key: str, value: str):
+    await db.user_memories.update_one(
+        {"user_id": user_id},
+        {"$set": {f"data.{key}": value, "updated_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True
+    )
+
+def extract_memories(response_text: str) -> tuple:
+    """Extract {{MEMORY: key=value}} tags and return clean text + memories"""
+    import re
+    memories = {}
+    pattern = r'\{\{MEMORY:\s*(\w+)=(.+?)\}\}'
+    for match in re.finditer(pattern, response_text):
+        memories[match.group(1)] = match.group(2).strip()
+    clean_text = re.sub(pattern, '', response_text).strip()
+    return clean_text, memories
+
+@api_router.get("/memory")
+async def get_memories(request: Request):
+    user = await require_user(request)
+    memories = await get_user_memories(user["user_id"])
+    return {"memories": memories}
+
+@api_router.delete("/memory")
+async def clear_memories(request: Request):
+    user = await require_user(request)
+    await db.user_memories.delete_one({"user_id": user["user_id"]})
+    return {"status": "cleared"}
+
+@api_router.delete("/memory/{key}")
+async def delete_memory(key: str, request: Request):
+    user = await require_user(request)
+    await db.user_memories.update_one({"user_id": user["user_id"]}, {"$unset": {f"data.{key}": ""}})
+    return {"status": "deleted"}
+
+# ─── Settings Routes ──────────────────────────────────────
+
+@api_router.get("/settings")
+async def get_settings(request: Request):
+    user = await require_user(request)
+    settings = await db.user_settings.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    defaults = {"preferred_language": "auto", "voice_enabled": True, "tts_enabled": True, "memory_enabled": True, "theme": "dark"}
+    if settings:
+        defaults.update({k: v for k, v in settings.items() if k not in ["user_id", "updated_at"]})
+    return defaults
+
+@api_router.put("/settings")
+async def update_settings(req: SettingsUpdate, request: Request):
+    user = await require_user(request)
+    updates = {k: v for k, v in req.dict().items() if v is not None}
+    if updates:
+        updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+        await db.user_settings.update_one({"user_id": user["user_id"]}, {"$set": updates}, upsert=True)
+    settings = await db.user_settings.find_one({"user_id": user["user_id"]}, {"_id": 0})
+    defaults = {"preferred_language": "auto", "voice_enabled": True, "tts_enabled": True, "memory_enabled": True, "theme": "dark"}
+    if settings:
+        defaults.update({k: v for k, v in settings.items() if k not in ["user_id", "updated_at"]})
+    return defaults
+
+@api_router.delete("/settings/history")
+async def clear_history(request: Request):
+    user = await require_user(request)
+    convs = await db.conversations.find({"user_id": user["user_id"]}, {"id": 1, "_id": 0}).to_list(500)
+    conv_ids = [c["id"] for c in convs]
+    if conv_ids:
+        await db.messages.delete_many({"conversation_id": {"$in": conv_ids}})
+    await db.conversations.delete_many({"user_id": user["user_id"]})
+    return {"status": "cleared", "deleted": len(conv_ids)}
+
+# ─── Image Generation Route ──────────────────────────────
+
+from emergentintegrations.llm.openai.image_generation import OpenAIImageGeneration
+
+@api_router.post("/generate/image")
+async def generate_image(req: ImageGenRequest, request: Request):
+    try:
+        user = await get_current_user(request)
+        user_id = user["user_id"] if user else "anonymous"
+        if user and not await check_daily_limit(user):
+            raise HTTPException(status_code=429, detail="Daily limit reached.")
+
+        image_gen = OpenAIImageGeneration(api_key=EMERGENT_LLM_KEY)
+        images = await image_gen.generate_images(
+            prompt=req.prompt,
+            model="gpt-image-1",
+            number_of_images=1,
+        )
+
+        if not images or len(images) == 0:
+            raise HTTPException(status_code=500, detail="No image generated")
+
+        image_base64 = base64.b64encode(images[0]).decode('utf-8')
+
+        conv = await get_or_create_conversation(user_id, "image", req.conversation_id or None)
+        conv_id = conv["id"]
+        await save_message(conv_id, "user", f"[Generate Image] {req.prompt}")
+        assistant_msg = await save_message(conv_id, "assistant", f"[Generated Image]\n\nPrompt: {req.prompt}")
+
+        title = f"Image: {req.prompt[:40]}" if conv.get("title") == "New Conversation" else conv["title"]
+        await db.conversations.update_one({"id": conv_id}, {"$set": {"title": title, "last_message": f"Generated: {req.prompt[:60]}", "updated_at": datetime.now(timezone.utc).isoformat()}})
+
+        if user:
+            await increment_daily_count(user["user_id"])
+
+        return {"conversation_id": conv_id, "message": assistant_msg, "image_base64": image_base64}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Image generation error: {e}")
+        raise HTTPException(status_code=500, detail=f"Image generation failed: {str(e)}")
 
 # Include router
 app.include_router(api_router)
