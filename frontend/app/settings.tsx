@@ -201,7 +201,7 @@ export default function SettingsScreen() {
           <Text style={styles.logoutText}>Logout</Text>
         </TouchableOpacity>
 
-        <Text style={styles.versionText}>LAILA AI v2.0 · Created by Bathie Sarr</Text>
+        <Text style={styles.versionText}>LAILA AI v3.0 · Created by Bathie Sarr</Text>
       </ScrollView>
     </SafeAreaView>
   );

@@ -192,13 +192,23 @@ HUMAN_TONE = (
 )
 
 MEMORY_PROMPT = (
-    "\n\n## USER MEMORY:\n"
-    "You have access to stored memories about this user. Use them naturally to personalize your responses.\n"
-    "If you learn something new and important about the user (name, goals, preferences, language, situation), "
-    "add it as a JSON line at the END of your response in this exact format:\n"
-    "{{MEMORY: key=value}}\n"
-    "Examples: {{MEMORY: name=Amadou}} or {{MEMORY: goal=find remote work}} or {{MEMORY: preferred_lang=french}}\n"
-    "Only add memory when you learn something genuinely useful. Don't force it.\n"
+    "\n\n## SMART MEMORY SYSTEM:\n"
+    "You remember things about users to give them a better, more personal experience.\n\n"
+    "**When to save a memory** (add at END of your response):\n"
+    "- User tells you their name → {{MEMORY: name=their_name}}\n"
+    "- User mentions their country/city → {{MEMORY: location=their_location}}\n"
+    "- User shares a goal → {{MEMORY: goal=their_goal}}\n"
+    "- User mentions their job/profession → {{MEMORY: profession=their_job}}\n"
+    "- User prefers a specific language → {{MEMORY: preferred_lang=the_language}}\n"
+    "- User mentions their age or education → {{MEMORY: education=their_level}}\n"
+    "- User shares skills → {{MEMORY: skills=their_skills}}\n"
+    "- User mentions a recurring interest → {{MEMORY: interest=the_interest}}\n\n"
+    "**Rules:**\n"
+    "- Only save when genuinely useful. Don't force it.\n"
+    "- Use memories naturally in conversation — don't announce you remembered.\n"
+    "- If you know their name, use it occasionally (not every message).\n"
+    "- If they mentioned a goal, reference it when relevant.\n"
+    "- Memory tags are invisible to the user — they only see your helpful response.\n"
 )
 
 BASE_PROMPT = (

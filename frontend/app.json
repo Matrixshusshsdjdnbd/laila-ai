@@ -2,7 +2,7 @@
   "expo": {
     "name": "LAILA AI",
     "slug": "laila-ai",
-    "version": "1.0.0",
+    "version": "3.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "laila-ai",
@@ -19,7 +19,7 @@
     },
     "android": {
       "package": "com.lailaai.app",
-      "versionCode": 1,
+      "versionCode": 3,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#0A0908"

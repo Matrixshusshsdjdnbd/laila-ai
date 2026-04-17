@@ -32,13 +32,14 @@ type Message = {
   role: 'user' | 'assistant';
   content: string;
   created_at: string;
+  image_base64?: string;
 };
 
 const QUICK_ACTIONS = [
   { id: 'work', icon: 'briefcase', label: 'Find Work', color: '#F59E0B' },
   { id: 'business', icon: 'trending-up', label: 'Start Business', color: '#10B981' },
   { id: 'translate', icon: 'language', label: 'Translate', color: '#3B82F6' },
-  { id: 'chat', icon: 'chatbubble', label: 'Ask Anything', color: '#A855F7' },
+  { id: 'image_gen', icon: 'image', label: 'Create Image', color: '#EC4899' },
 ];
 
 const PRESET_PROMPTS = [
@@ -299,12 +300,49 @@ export default function ChatScreen() {
     ]);
   };
 
+  // ─── Image Generation ─────────────────────────────────
+  const generateImage = async (prompt: string) => {
+    const userMsg: Message = { id: Date.now().toString(), role: 'user', content: `Create an image: ${prompt}`, created_at: new Date().toISOString() };
+    setMessages(prev => [...prev, userMsg]);
+    setInput('');
+    setLoading(true);
+    Keyboard.dismiss();
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/generate/image`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ prompt, conversation_id: conversationId }),
+      });
+      if (!res.ok) throw new Error('Generation failed');
+      const data = await res.json();
+      setConversationId(data.conversation_id);
+      const imgMsg: Message = { ...data.message, image_base64: data.image_base64 };
+      setMessages(prev => [...prev, imgMsg]);
+    } catch {
+      setMessages(prev => [...prev, { id: Date.now().toString() + '-err', role: 'assistant', content: 'Sorry, could not generate the image. Please try again.', created_at: new Date().toISOString() }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const showImageGenPrompt = () => {
+    if (input.trim()) {
+      generateImage(input.trim());
+    } else {
+      Alert.prompt ? Alert.prompt('Generate Image', 'Describe the image you want:', (text: string) => { if (text?.trim()) generateImage(text.trim()); }) :
+      Alert.alert('Generate Image', 'Type your image description in the chat input, then tap the Create Image button again.');
+    }
+  };
+
   const handleQuickAction = (actionId: string) => {
+    if (actionId === 'image_gen') {
+      showImageGenPrompt();
+      return;
+    }
     const prompts: Record<string, string> = {
       work: 'I need help finding a job. What skills do I have and what opportunities are available for me?',
       business: 'Give me practical business ideas I can start with my phone and little money in Africa.',
       translate: 'I need to translate something. I can translate between Wolof, French, English, and Italian. What do you want to translate?',
-      chat: 'Hello LAILA! What can you help me with today?',
     };
     setMode(actionId);
     sendMessage(prompts[actionId], actionId);
@@ -326,6 +364,7 @@ export default function ChatScreen() {
     const isUser = item.role === 'user';
     const isPlaying = playingId === item.id;
     const isTtsLoading = loadingTtsId === item.id;
+    const hasImage = item.image_base64;
 
     return (
       <View testID={`message-${item.id}`} style={[styles.msgRow, isUser ? styles.msgRowUser : styles.msgRowAi]}>
@@ -338,9 +377,19 @@ export default function ChatScreen() {
           <View style={[styles.bubble, isUser ? styles.userBubble : styles.aiBubble]}>
             {!isUser && <Text style={styles.aiLabel}>LAILA</Text>}
             <Text style={[styles.msgText, isUser && styles.userMsgText]}>{item.content}</Text>
+            {/* Generated Image Display */}
+            {hasImage && (
+              <View style={styles.genImageWrap}>
+                <View style={styles.genImageContainer}>
+                  <Ionicons name="image" size={48} color={COLORS.primary} />
+                  <Text style={styles.genImageText}>Image Generated</Text>
+                  <Text style={styles.genImageNote}>View on mobile device</Text>
+                </View>
+              </View>
+            )}
           </View>
-          {/* TTS Speaker Button - only for AI messages */}
-          {!isUser && (
+          {/* TTS Speaker Button */}
+          {!isUser && !hasImage && (
             <TouchableOpacity
               testID={`tts-btn-${item.id}`}
               style={[styles.ttsBtn, isPlaying && styles.ttsBtnPlaying]}
@@ -351,11 +400,7 @@ export default function ChatScreen() {
               {isTtsLoading ? (
                 <ActivityIndicator size={14} color={COLORS.primary} />
               ) : (
-                <Ionicons
-                  name={isPlaying ? 'stop-circle' : 'volume-medium'}
-                  size={16}
-                  color={isPlaying ? COLORS.recording : COLORS.primary}
-                />
+                <Ionicons name={isPlaying ? 'stop-circle' : 'volume-medium'} size={16} color={isPlaying ? COLORS.recording : COLORS.primary} />
               )}
               <Text style={[styles.ttsText, isPlaying && styles.ttsTextPlaying]}>
                 {isTtsLoading ? 'Loading...' : isPlaying ? 'Stop' : 'Listen'}
@@ -474,7 +519,11 @@ export default function ChatScreen() {
         <View style={styles.inputContainer}>
           {/* Image picker button */}
           <TouchableOpacity testID="image-btn" style={styles.imageBtn} onPress={showImageOptions} disabled={loading}>
-            <Ionicons name="camera" size={22} color={COLORS.mutedFg} />
+            <Ionicons name="camera" size={20} color={COLORS.mutedFg} />
+          </TouchableOpacity>
+          {/* Image gen button */}
+          <TouchableOpacity testID="image-gen-btn" style={styles.imageBtn} onPress={showImageGenPrompt} disabled={loading}>
+            <Ionicons name="sparkles" size={20} color="#EC4899" />
           </TouchableOpacity>
           <TextInput testID="chat-input" style={styles.input} placeholder="Ask LAILA anything..."
             placeholderTextColor={COLORS.mutedFg} value={input} onChangeText={setInput}
@@ -545,6 +594,11 @@ const styles = StyleSheet.create({
   ttsBtnPlaying: { backgroundColor: 'rgba(239, 68, 68, 0.1)', borderColor: 'rgba(239, 68, 68, 0.2)' },
   ttsText: { fontSize: 12, color: COLORS.primary, fontWeight: '600' },
   ttsTextPlaying: { color: COLORS.recording },
+  // Generated Image
+  genImageWrap: { marginTop: 10 },
+  genImageContainer: { backgroundColor: 'rgba(236, 72, 153, 0.08)', borderRadius: 12, padding: 20, alignItems: 'center', borderWidth: 0.5, borderColor: 'rgba(236, 72, 153, 0.2)' },
+  genImageText: { fontSize: 14, fontWeight: '600', color: '#EC4899', marginTop: 8 },
+  genImageNote: { fontSize: 11, color: COLORS.mutedFg, marginTop: 4 },
   // Loading
   loadingRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingHorizontal: 16, paddingVertical: 8 },
   loadingBubble: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: COLORS.aiBubble, borderRadius: 14, paddingHorizontal: 16, paddingVertical: 10, borderWidth: 0.5, borderColor: 'rgba(255, 193, 7, 0.15)' },
