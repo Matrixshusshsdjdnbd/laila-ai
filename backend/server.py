@@ -340,7 +340,8 @@ async def chat_image(file: UploadFile = File(...), message: str = Form(default="
         conv = await get_or_create_conversation(user_id, "image", conversation_id or None)
         conv_id = conv["id"]
         await save_message(conv_id, "user", f"[Image] {message}")
-        file_content = FileContent(content_type=content_type, file_content_base64=img_base64)
+        # FileContent: content_type must be "image" to use image_url format in the library
+        file_content = FileContent(content_type="image", file_content_base64=img_base64)
         system_prompt = SYSTEM_PROMPTS["image"]
         response = await call_ai(system_prompt, message, f"laila-img-{uuid.uuid4().hex[:8]}", file_contents=[file_content])
         assistant_msg = await save_message(conv_id, "assistant", response)

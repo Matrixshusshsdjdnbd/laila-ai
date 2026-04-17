@@ -1,69 +1,84 @@
 # LAILA AI – Africa Smart Assistant
 
-## Product Requirements Document (PRD)
+## Product Requirements Document (PRD) v2.0
 
 ### Vision
-A powerful AI assistant app designed to help people in Africa in daily life - work, study, communication, and personal growth. Simple, fast, and intelligent.
+A powerful AI assistant app designed to help people in Africa in daily life - work, study, communication, and personal growth. Multi-modal: text, voice, and image.
 
-### Core Features (MVP)
+### Core Features
 
-#### 1. AI Smart Chat
-- GPT-4o powered chat via Emergent LLM Key
+#### 1. Authentication
+- Email/Password registration and login (PBKDF2 hashing, JWT sessions)
+- Google OAuth via Emergent Auth
+- Session persistence with AsyncStorage
+- Clean login/register screen with toggle tabs
+
+#### 2. AI Smart Chat (GPT-4o)
 - Conversational AI with context memory
-- Multi-language support (French, English, Italian, Wolof)
-- Quick action buttons for Work, Study, Translation, Business
-- Conversation history stored in MongoDB
+- Multi-language: French, English, Italian, Wolof
+- Auto language detection and matching
+- Creator identity: Bathie Sarr (on request)
+- Quick action buttons and preset prompts
 
-#### 2. Language Translation
+#### 3. Image Analysis (GPT-4o Vision)
+- Camera photo capture
+- Gallery image selection
+- AI analyzes and describes images
+- Translates text in images
+- Helps with documents and forms
+
+#### 4. Voice Features
+- **Voice-to-text**: Whisper API transcription (mic button)
+- **Text-to-speech**: OpenAI TTS playback (speaker button under AI messages)
+- Supports IT/FR/EN/Wolof
+
+#### 5. Language Translation
 - AI-powered translation between Wolof, French, English, Italian
-- Swap languages with one tap
-- Explanations of key words/phrases
-- Clean translation interface
+- Swap languages, word explanations
 
-#### 3. AI Assistants (Work & Study)
-- **CV Builder** - Auto-generate professional CVs
-- **Job Finder** - Find job opportunities based on skills
-- **Business Ideas** - Practical business ideas for Africa
-- **Homework Help** - Step-by-step explanations
-- **Social Media** - Create engaging content
-- **Professional Messages** - Write polished messages
+#### 6. AI Assistants
+- CV Builder, Job Finder, Business Ideas
+- Homework Help, Social Media, Professional Messages
 
-#### 4. Conversation History
-- View all past conversations
-- Expand to see messages
-- Delete conversations
-- Organized by mode (chat, work, study, etc.)
+#### 7. Smart AI Modes
+- Chat, Work, Study, Business, Content, Life, Translation, Image
+
+#### 8. Freemium Model
+- Free: 20 messages/day
+- Premium: unlimited (prepared for future)
+- Daily counter reset at midnight UTC
+
+#### 9. Conversation History
+- Per-user chat history linked to accounts
+- View, expand, delete conversations
 
 ### Technical Stack
 - **Frontend:** Expo React Native (SDK 54) with Expo Router tabs
 - **Backend:** FastAPI with async endpoints
-- **Database:** MongoDB (conversations + messages collections)
-- **AI Provider:** OpenAI GPT-4o via Emergent LLM Key
-- **Architecture:** Device-based sessions (no authentication)
-
-### Design
-- Dark mode (#0A0908 background, #FFC107 gold accent)
-- African-inspired aesthetic
-- 48px+ touch targets for accessibility
-- Optimized for low-end Android devices
-- Bottom tab navigation (Chat, Translate, Assistants, History)
+- **Database:** MongoDB (users, conversations, messages, sessions)
+- **AI:** OpenAI GPT-4o (chat + vision), Whisper (STT), TTS-1 (speech)
+- **Auth:** PBKDF2 password hashing, token-based sessions, Emergent Google OAuth
 
 ### API Endpoints
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | /api/ | Health check |
+| POST | /api/auth/register | Register |
+| POST | /api/auth/login | Login |
+| GET | /api/auth/me | Current user |
+| POST | /api/auth/logout | Logout |
+| POST | /api/auth/google/session | Google OAuth |
 | POST | /api/chat | AI chat |
+| POST | /api/chat/image | Image analysis |
 | POST | /api/translate | Translation |
 | POST | /api/generate | Content generation |
-| POST | /api/transcribe | Voice-to-text (Whisper) |
-| GET | /api/conversations | List conversations |
-| GET | /api/conversations/{id}/messages | Get messages |
-| DELETE | /api/conversations/{id} | Delete conversation |
+| POST | /api/transcribe | Voice-to-text |
+| POST | /api/tts | Text-to-speech |
+| GET | /api/conversations | List history |
+| GET | /api/conversations/{id}/messages | Messages |
+| DELETE | /api/conversations/{id} | Delete |
 
-### Future Enhancements
-- User authentication (Google OAuth)
-- Voice input/output
-- Offline mode
+### Future
+- Payment integration (Wave, Orange Money via PayDunya/CinetPay)
+- Offline caching
 - Push notifications
-- Premium features (subscription model)
-- More African languages support
+- More African languages
