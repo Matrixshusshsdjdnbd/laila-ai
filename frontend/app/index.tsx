@@ -2,7 +2,7 @@ import React, { useState, useRef, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TextInput, TouchableOpacity,
   FlatList, KeyboardAvoidingView, Platform, ActivityIndicator,
-  SafeAreaView, Keyboard, ScrollView, Alert,
+  SafeAreaView, Keyboard, ScrollView, Alert, Image,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
@@ -331,8 +331,10 @@ export default function ChatScreen() {
     if (input.trim()) {
       generateImage(input.trim());
     } else {
-      Alert.prompt ? Alert.prompt('Generate Image', 'Describe the image you want:', (text: string) => { if (text?.trim()) generateImage(text.trim()); }) :
-      Alert.alert('Generate Image', 'Type your image description in the chat input, then tap the Create Image button again.');
+      Alert.alert(
+        'Generate Image',
+        'Type a description of the image you want in the chat input, then tap the ✨ button again.\n\nExample: "A sunset over Dakar"',
+      );
     }
   };
 
@@ -381,13 +383,11 @@ export default function ChatScreen() {
             <Text style={[styles.msgText, isUser && styles.userMsgText]}>{item.content}</Text>
             {/* Generated Image Display */}
             {hasImage && (
-              <View style={styles.genImageWrap}>
-                <View style={styles.genImageContainer}>
-                  <Ionicons name="image" size={48} color={COLORS.primary} />
-                  <Text style={styles.genImageText}>Image Generated</Text>
-                  <Text style={styles.genImageNote}>View on mobile device</Text>
-                </View>
-              </View>
+              <Image
+                source={{ uri: `data:image/png;base64,${item.image_base64}` }}
+                style={styles.genImage}
+                resizeMode="contain"
+              />
             )}
           </View>
           {/* TTS Speaker Button */}
@@ -613,10 +613,7 @@ const styles = StyleSheet.create({
   ttsText: { fontSize: 12, color: COLORS.primary, fontWeight: '600' },
   ttsTextPlaying: { color: COLORS.recording },
   // Generated Image
-  genImageWrap: { marginTop: 10 },
-  genImageContainer: { backgroundColor: 'rgba(236, 72, 153, 0.08)', borderRadius: 12, padding: 20, alignItems: 'center', borderWidth: 0.5, borderColor: 'rgba(236, 72, 153, 0.2)' },
-  genImageText: { fontSize: 14, fontWeight: '600', color: '#EC4899', marginTop: 8 },
-  genImageNote: { fontSize: 11, color: COLORS.mutedFg, marginTop: 4 },
+  genImage: { width: '100%', height: 250, borderRadius: 12, marginTop: 10 },
   // Loading
   loadingRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingHorizontal: 16, paddingVertical: 8 },
   loadingBubble: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: COLORS.aiBubble, borderRadius: 14, paddingHorizontal: 16, paddingVertical: 10, borderWidth: 0.5, borderColor: 'rgba(255, 193, 7, 0.15)' },
