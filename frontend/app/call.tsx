@@ -118,7 +118,7 @@ export default function CallScreen() {
       const chatRes = await fetch(`${BACKEND_URL}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ message: sttData.text, conversation_id: conversationId, mode: 'chat' }),
+        body: JSON.stringify({ message: sttData.text, conversation_id: conversationId, mode: 'voice_call' }),
       });
       if (!chatRes.ok) throw new Error('Chat failed');
       const chatData = await chatRes.json();
@@ -127,12 +127,13 @@ export default function CallScreen() {
       setResponse(aiText);
       setTurnCount(t => t + 1);
 
-      // Step 3: TTS
+      // Step 3: TTS — limit to 500 chars for speed in voice mode
       setState('speaking');
+      const ttsText = aiText.length > 500 ? aiText.substring(0, 497) + '...' : aiText;
       const ttsRes = await fetch(`${BACKEND_URL}/api/tts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: aiText.substring(0, 4096), voice: 'nova' }),
+        body: JSON.stringify({ text: ttsText, voice: 'nova' }),
       });
       if (!ttsRes.ok) throw new Error('TTS failed');
       const ttsData = await ttsRes.json();
