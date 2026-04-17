@@ -480,6 +480,90 @@ async def text_to_speech(req: TTSRequest):
         logger.error(f"TTS error: {e}")
         raise HTTPException(status_code=500, detail=f"Speech generation failed: {str(e)}")
 
+# ─── Payment / Premium Routes ────────────────────────────
+# TODO: Replace mock with real PayDunya/CinetPay credentials
+PAYDUNYA_MASTER_KEY = os.environ.get("PAYDUNYA_MASTER_KEY", "mock_master_key")
+PAYDUNYA_PRIVATE_KEY = os.environ.get("PAYDUNYA_PRIVATE_KEY", "mock_private_key")
+PAYDUNYA_TOKEN = os.environ.get("PAYDUNYA_TOKEN", "mock_token")
+PAYMENT_MODE = os.environ.get("PAYMENT_MODE", "mock")  # "mock" or "live"
+
+PLANS = [
+    {"id": "weekly", "name": "Weekly", "price": 500, "currency": "FCFA", "duration_days": 7, "description": "7 days unlimited"},
+    {"id": "monthly", "name": "Monthly", "price": 1500, "currency": "FCFA", "duration_days": 30, "description": "30 days unlimited", "popular": True},
+    {"id": "yearly", "name": "Yearly", "price": 12000, "currency": "FCFA", "duration_days": 365, "description": "12 months unlimited", "savings": "33% savings"},
+]
+
+class PaymentInitRequest(BaseModel):
+    plan_id: str
+    payment_method: str  # "wave" or "orange_money"
+    phone_number: str = ""
+
+@api_router.get("/payment/plans")
+async def get_plans():
+    return {"plans": PLANS, "free_limit": FREE_DAILY_LIMIT}
+
+@api_router.post("/payment/initiate")
+async def initiate_payment(req: PaymentInitRequest, request: Request):
+    user = await require_user(request)
+    plan = next((p for p in PLANS if p["id"] == req.plan_id), None)
+    if not plan:
+        raise HTTPException(status_code=400, detail="Invalid plan")
+    if req.payment_method not in ["wave", "orange_money"]:
+        raise HTTPException(status_code=400, detail="Invalid payment method")
+
+    payment_id = f"pay_{uuid.uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc).isoformat()
+
+    payment = {
+        "payment_id": payment_id,
+        "user_id": user["user_id"],
+        "plan_id": req.plan_id,
+        "amount": plan["price"],
+        "currency": plan["currency"],
+        "payment_method": req.payment_method,
+        "phone_number": req.phone_number,
+        "status": "pending",
+        "created_at": now,
+    }
+
+    if PAYMENT_MODE == "live":
+        # TODO: Real PayDunya/CinetPay API call here
+        # Example PayDunya flow:
+        # 1. Create invoice via PayDunya API
+        # 2. Get payment URL
+        # 3. Return URL to frontend for redirect
+        payment["provider_ref"] = "paydunya_invoice_id"
+        payment["payment_url"] = "https://paydunya.com/checkout/..."
+    else:
+        # Mock: auto-approve after creation
+        payment["status"] = "completed"
+        payment["provider_ref"] = f"mock_{payment_id}"
+
+        # Upgrade user to premium
+        expires = datetime.now(timezone.utc) + timedelta(days=plan["duration_days"])
+        await db.users.update_one(
+            {"user_id": user["user_id"]},
+            {"$set": {"tier": "premium", "premium_expires": expires.isoformat(), "premium_plan": req.plan_id}}
+        )
+
+    await db.payments.insert_one(payment)
+    result = {k: v for k, v in payment.items() if k != "_id"}
+    return result
+
+@api_router.get("/payment/status/{payment_id}")
+async def payment_status(payment_id: str, request: Request):
+    user = await require_user(request)
+    payment = await db.payments.find_one({"payment_id": payment_id, "user_id": user["user_id"]}, {"_id": 0})
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    return payment
+
+@api_router.get("/payment/history")
+async def payment_history(request: Request):
+    user = await require_user(request)
+    payments = await db.payments.find({"user_id": user["user_id"]}, {"_id": 0}).sort("created_at", -1).limit(20).to_list(20)
+    return {"payments": payments}
+
 # Include router
 app.include_router(api_router)
 
