@@ -278,17 +278,42 @@ export default function ChatScreen() {
   const pickImage = async (useCamera: boolean) => {
     try {
       if (useCamera) {
-        const perm = await ImagePicker.requestCameraPermissionsAsync();
-        if (!perm.granted) { Alert.alert('Permission needed', 'Please allow camera access.'); return; }
+        // Request camera permission explicitly
+        const { status } = await ImagePicker.requestCameraPermissionsAsync();
+        if (status !== 'granted') {
+          Alert.alert('Camera Permission', 'LAILA needs camera access to take photos. Please enable it in your device settings.');
+          return;
+        }
+        // Launch camera with Android-safe options
+        const result = await ImagePicker.launchCameraAsync({
+          allowsEditing: true,
+          quality: 0.6,
+          base64: true,
+          exif: false,
+        });
+        if (result.canceled || !result.assets?.[0]) return;
+        const asset = result.assets[0];
+        sendImage(asset.uri, asset.base64 || '', input.trim() || 'What is in this image? Describe and help me.');
+      } else {
+        // Gallery - request media library permission
+        const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+        if (status !== 'granted') {
+          Alert.alert('Gallery Permission', 'LAILA needs gallery access to select photos. Please enable it in your device settings.');
+          return;
+        }
+        const result = await ImagePicker.launchImageLibraryAsync({
+          allowsEditing: true,
+          quality: 0.6,
+          base64: true,
+          exif: false,
+        });
+        if (result.canceled || !result.assets?.[0]) return;
+        const asset = result.assets[0];
+        sendImage(asset.uri, asset.base64 || '', input.trim() || 'What is in this image? Describe and help me.');
       }
-      const result = useCamera
-        ? await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.6, base64: true })
-        : await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.6, base64: true });
-      if (result.canceled || !result.assets?.[0]) return;
-      const asset = result.assets[0];
-      sendImage(asset.uri, asset.base64 || '', input.trim() || 'What is in this image? Describe and help me.');
-    } catch (err) {
-      Alert.alert('Error', 'Could not pick image.');
+    } catch (err: any) {
+      console.error('Image picker error:', err);
+      Alert.alert('Error', 'Could not open camera/gallery. Please check app permissions in your device settings.');
     }
   };
 
@@ -394,21 +419,39 @@ export default function ChatScreen() {
   // ─── Save & Share Image ────────────────────────────────
   const saveImage = async (base64Data: string) => {
     try {
-      const perm = await MediaLibrary.requestPermissionsAsync();
-      if (!perm.granted) { Alert.alert('Permission needed', 'Allow photo library access to save images.'); return; }
+      const { status } = await MediaLibrary.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Needed', 'Allow LAILA to save images to your gallery in device settings.');
+        return;
+      }
       const fileUri = FileSystem.cacheDirectory + `laila_image_${Date.now()}.png`;
       await FileSystem.writeAsStringAsync(fileUri, base64Data, { encoding: FileSystem.EncodingType.Base64 });
-      await MediaLibrary.saveToLibraryAsync(fileUri);
-      Alert.alert('Saved!', 'Image saved to your gallery.');
-    } catch { Alert.alert('Error', 'Could not save image.'); }
+      const asset = await MediaLibrary.createAssetAsync(fileUri);
+      if (asset) {
+        Alert.alert('Saved!', 'Image saved to your gallery.');
+      } else {
+        throw new Error('Save failed');
+      }
+    } catch (err: any) {
+      console.error('Save error:', err);
+      Alert.alert('Save Failed', 'Could not save image. Please check storage permissions in settings.');
+    }
   };
 
   const shareImage = async (base64Data: string) => {
     try {
       const fileUri = FileSystem.cacheDirectory + `laila_share_${Date.now()}.png`;
       await FileSystem.writeAsStringAsync(fileUri, base64Data, { encoding: FileSystem.EncodingType.Base64 });
-      await Sharing.shareAsync(fileUri, { mimeType: 'image/png' });
-    } catch { Alert.alert('Error', 'Could not share image.'); }
+      const isAvailable = await Sharing.isAvailableAsync();
+      if (!isAvailable) {
+        Alert.alert('Sharing not available', 'Sharing is not available on this device.');
+        return;
+      }
+      await Sharing.shareAsync(fileUri, { mimeType: 'image/png', dialogTitle: 'Share LAILA AI Image' });
+    } catch (err: any) {
+      console.error('Share error:', err);
+      Alert.alert('Share Failed', 'Could not share image.');
+    }
   };
 
   const renderMessage = ({ item }: { item: Message }) => {
@@ -675,9 +718,9 @@ const styles = StyleSheet.create({
   // Images
   userImage: { width: '100%', height: 180, borderRadius: 10, marginBottom: 8 },
   genImage: { width: '100%', height: 250, borderRadius: 12, marginTop: 10 },
-  imgActions: { flexDirection: 'row', gap: 12, marginTop: 8, justifyContent: 'flex-start' },
-  imgActionBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10, backgroundColor: 'rgba(255, 193, 7, 0.1)', borderWidth: 0.5, borderColor: 'rgba(255, 193, 7, 0.15)' },
-  imgActionText: { fontSize: 12, color: COLORS.primary, fontWeight: '600' },
+  imgActions: { flexDirection: 'row', gap: 10, marginTop: 10, justifyContent: 'flex-start' },
+  imgActionBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12, backgroundColor: 'rgba(255, 193, 7, 0.12)', borderWidth: 0.5, borderColor: 'rgba(255, 193, 7, 0.2)' },
+  imgActionText: { fontSize: 14, color: COLORS.primary, fontWeight: '700' },
   // Loading
   loadingRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingHorizontal: 16, paddingVertical: 8 },
   loadingBubble: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: COLORS.aiBubble, borderRadius: 14, paddingHorizontal: 16, paddingVertical: 10, borderWidth: 0.5, borderColor: 'rgba(255, 193, 7, 0.15)' },
