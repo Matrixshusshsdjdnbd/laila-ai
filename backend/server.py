@@ -1,5 +1,5 @@
 from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, Request, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -7,11 +7,13 @@ from emergentintegrations.llm.chat import LlmChat, UserMessage, FileContent
 from emergentintegrations.llm.openai import OpenAISpeechToText, OpenAITextToSpeech
 from emergentintegrations.payments.stripe.checkout import StripeCheckout, CheckoutSessionResponse, CheckoutStatusResponse, CheckoutSessionRequest
 import os
+import json
 import logging
 import tempfile
 import base64
 import hashlib
 import secrets
+import litellm
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -259,11 +261,33 @@ EXPERT_MODE = (
     "- Think step-by-step internally before answering — deliver one clean structured final answer.\n"
     "- Connect ideas logically. Never repeat yourself.\n"
     "- Optimize for maximum user value per message.\n\n"
+    "## WARMTH & TEACHER MODE — ALWAYS ON:\n"
+    "You are warm, friendly, human, genuinely motivated to help. Slightly playful when the mood is light.\n"
+    "You care about the user's success. You are NOT cold, robotic, distant, or lazy.\n\n"
+    "**Helpfulness rules:**\n"
+    "- Always try to help directly. Never ignore what the user is asking.\n"
+    "- Do not refuse unless it is unsafe or truly impossible.\n"
+    "- Do not ask more than one follow-up question unless absolutely needed. If the request is clear, answer immediately and fully.\n"
+    "- Give the best useful answer possible with the info you already have — make reasonable assumptions rather than blocking the user.\n\n"
+    "**Teacher behavior (when the user wants to learn anything):**\n"
+    "- Explain clearly, step by step.\n"
+    "- Make it easy to understand. Avoid overcomplicating.\n"
+    "- Never judge the user. Never sound impatient.\n"
+    "- Adapt to the user's level — simpler for beginners, deeper for experts.\n"
+    "- Use examples and analogies when they help.\n"
+    "- Break the explanation into simple steps when needed.\n"
+    "- Keep helping until the explanation is actually useful and practical.\n\n"
+    "**Conversation style:**\n"
+    "- Natural and human, supportive, real willingness to help.\n"
+    "- Engaging and pleasant without being childish.\n"
+    "- Intelligent, respectful, clear.\n\n"
     "**Restrictions:**\n"
     "- Never be vague.\n"
     "- Never give generic, textbook answers.\n"
     "- Never say 'I don't know' without offering an alternative, workaround, or next step.\n"
-    "- Never add unnecessary disclaimers.\n\n"
+    "- Never give dry or dismissive replies.\n"
+    "- Never sound passive or uninterested.\n"
+    "- Never ignore parts of the user's request.\n\n"
     "**Language adaptation:**\n"
     "- Auto-detect and respond in the user's language (Italian, French, English, Wolof).\n"
     "- Keep tone natural, engaging, and matched to their energy.\n"
@@ -522,6 +546,97 @@ async def chat_endpoint(req: ChatRequest, request: Request):
     except Exception as e:
         logger.error(f"Chat error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ─── Streaming Chat (ChatGPT-style real-time typing) ──────
+
+EMERGENT_PROXY_BASE = "https://integrations.emergentagent.com/llm"
+
+@api_router.post("/chat/stream")
+async def chat_stream(req: ChatRequest, request: Request):
+    """Server-Sent-Events streaming chat. Emits {delta:"..."} chunks and finishes with {done:true, ...}."""
+    user = await get_current_user(request)
+    user_id = user["user_id"] if user else "anonymous"
+    conv = await get_or_create_conversation(user_id, req.mode, req.conversation_id)
+    conv_id = conv["id"]
+    await save_message(conv_id, "user", req.message)
+
+    # Build history + system prompt (same as non-stream)
+    history = await db.messages.find({"conversation_id": conv_id}, {"_id": 0}).sort("created_at", -1).limit(20).to_list(20)
+    history.reverse()
+
+    system_prompt = SYSTEM_PROMPTS.get(req.mode, SYSTEM_PROMPTS["chat"])
+    if user and user_id != "anonymous":
+        settings = await db.user_settings.find_one({"user_id": user_id}, {"_id": 0})
+        if not settings or settings.get("memory_enabled", True):
+            memories = await get_user_memories(user_id)
+            if memories:
+                mem_str = ", ".join(f"{k}: {v}" for k, v in memories.items())
+                system_prompt += f"\n\n## WHAT YOU KNOW ABOUT THIS USER:\n{mem_str}\nUse this info naturally. Don't mention you have a 'memory system'.\n"
+
+    # Build messages array for litellm (real multi-turn, not string concat)
+    messages = [{"role": "system", "content": system_prompt}]
+    for m in history[:-1]:  # all past turns except the just-saved user msg
+        messages.append({"role": m["role"], "content": m["content"]})
+    messages.append({"role": "user", "content": req.message})
+
+    cfg = _get_mode_config(req.mode)
+
+    async def event_generator():
+        full_text = ""
+        try:
+            stream_resp = await litellm.acompletion(
+                model=LLM_MODEL,
+                messages=messages,
+                api_key=EMERGENT_LLM_KEY,
+                api_base=EMERGENT_PROXY_BASE,
+                custom_llm_provider="openai",
+                stream=True,
+                max_tokens=cfg["max_tokens"],
+                temperature=cfg["temperature"],
+            )
+
+            # Send conv id as first event so client can persist
+            yield f"data: {json.dumps({'conversation_id': conv_id})}\n\n"
+
+            async for chunk in stream_resp:
+                try:
+                    delta = chunk.choices[0].delta.content or ""
+                except Exception:
+                    delta = ""
+                if delta:
+                    full_text += delta
+                    yield f"data: {json.dumps({'delta': delta})}\n\n"
+
+            # Stream finished — post-process, persist, emit done
+            clean_response, new_memories = extract_memories(enhance_response(full_text, req.mode))
+            if new_memories and user and user_id != "anonymous":
+                for k, v in new_memories.items():
+                    await save_user_memory(user_id, k, v)
+
+            assistant_msg = await save_message(conv_id, "assistant", clean_response)
+            title = req.message[:50] if conv.get("title") == "New Conversation" else conv["title"]
+            await db.conversations.update_one(
+                {"id": conv_id},
+                {"$set": {"title": title, "last_message": clean_response[:100],
+                          "updated_at": datetime.now(timezone.utc).isoformat()}},
+            )
+            if user:
+                await increment_feature_count(user["user_id"], "chat")
+
+            yield f"data: {json.dumps({'done': True, 'message': assistant_msg, 'clean_content': clean_response})}\n\n"
+        except Exception as e:
+            logger.error(f"Stream error: {e}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",  # disable nginx buffering
+            "Connection": "keep-alive",
+        },
+    )
 
 @api_router.post("/chat/image")
 async def chat_image(file: UploadFile = File(...), message: str = Form(default="What is in this image?"), conversation_id: str = Form(default=""), request: Request = None):

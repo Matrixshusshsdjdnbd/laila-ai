@@ -107,48 +107,107 @@ export default function ChatScreen() {
       created_at: new Date().toISOString(),
     };
 
-    setMessages(prev => [...prev, userMsg]);
+    const assistantId = Date.now().toString() + '-a';
+    const assistantPlaceholder: Message = {
+      id: assistantId,
+      role: 'assistant',
+      content: '',
+      created_at: new Date().toISOString(),
+    };
+
+    setMessages(prev => [...prev, userMsg, assistantPlaceholder]);
     setInput('');
     setLoading(true);
     Keyboard.dismiss();
 
+    // Auto-scroll helper
+    const scrollToEnd = () => {
+      try { flatListRef.current?.scrollToEnd({ animated: true }); } catch {}
+    };
+    setTimeout(scrollToEnd, 50);
+
+    // ─── Real-time streaming via XMLHttpRequest (reliable on RN) ────
     try {
-      const res = await fetch(`${BACKEND_URL}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({
+      await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', `${BACKEND_URL}/api/chat/stream`);
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.setRequestHeader('Accept', 'text/event-stream');
+        if (authToken) xhr.setRequestHeader('Authorization', `Bearer ${authToken}`);
+
+        let lastProcessedIndex = 0;
+        let buffer = '';
+        let accumulatedText = '';
+
+        const flushBuffer = () => {
+          // Split on double-newline (SSE event boundary)
+          const events = buffer.split('\n\n');
+          buffer = events.pop() || ''; // keep last incomplete event
+          for (const evt of events) {
+            const line = evt.split('\n').find(l => l.startsWith('data: '));
+            if (!line) continue;
+            const payload = line.slice(6);
+            try {
+              const data = JSON.parse(payload);
+              if (data.delta) {
+                accumulatedText += data.delta;
+                setMessages(prev => prev.map(m =>
+                  m.id === assistantId ? { ...m, content: accumulatedText } : m
+                ));
+              } else if (data.conversation_id && !data.done) {
+                setConversationId(data.conversation_id);
+              } else if (data.done) {
+                // Replace placeholder with persisted message (clean content + real id)
+                if (data.clean_content) {
+                  setMessages(prev => prev.map(m =>
+                    m.id === assistantId
+                      ? { ...m, content: data.clean_content, id: data.message?.id || m.id }
+                      : m
+                  ));
+                }
+              } else if (data.error) {
+                setMessages(prev => prev.map(m =>
+                  m.id === assistantId ? { ...m, content: 'Sorry, something went wrong. Please try again.' } : m
+                ));
+              }
+            } catch {}
+          }
+        };
+
+        xhr.onreadystatechange = () => {
+          // 3 = LOADING (receiving data), 4 = DONE
+          if (xhr.readyState >= 3) {
+            const newChunk = xhr.responseText.substring(lastProcessedIndex);
+            lastProcessedIndex = xhr.responseText.length;
+            if (newChunk) {
+              buffer += newChunk;
+              flushBuffer();
+              scrollToEnd();
+            }
+            if (xhr.readyState === 4) {
+              if (xhr.status >= 200 && xhr.status < 300) resolve();
+              else reject(new Error(`HTTP ${xhr.status}`));
+            }
+          }
+        };
+
+        xhr.onerror = () => reject(new Error('Network error'));
+        xhr.send(JSON.stringify({
           message: msg,
           conversation_id: conversationId,
           mode: chatMode || mode,
-        }),
+        }));
       });
-
-      if (res.status === 429) {
-        const errData = await res.json();
-        setMessages(prev => [...prev, {
-          id: Date.now().toString() + '-limit',
-          role: 'assistant',
-          content: errData.detail || 'Daily limit reached. Upgrade to Premium for unlimited access!',
-          created_at: new Date().toISOString(),
-        }]);
-        setLoading(false);
-        return;
-      }
-      if (!res.ok) throw new Error('Failed');
-      const data = await res.json();
-      setConversationId(data.conversation_id);
-      setMessages(prev => [...prev, data.message]);
     } catch (err) {
-      setMessages(prev => [...prev, {
-        id: Date.now().toString() + '-err',
-        role: 'assistant',
-        content: 'Sorry, I could not process your request. Please try again.',
-        created_at: new Date().toISOString(),
-      }]);
+      setMessages(prev => prev.map(m =>
+        m.id === assistantId && !m.content
+          ? { ...m, content: 'Sorry, I could not process your request. Please try again.' }
+          : m
+      ));
     } finally {
       setLoading(false);
     }
-  }, [input, loading, conversationId, mode]);
+  }, [input, loading, conversationId, mode, authToken]);
 
   // ─── TTS Playback ─────────────────────────────────────
   const playTTS = async (messageId: string, text: string) => {
@@ -475,7 +534,15 @@ export default function ChatScreen() {
             {hasUserImage && (
               <Image source={{ uri: hasUserImage }} style={styles.userImage} resizeMode="cover" />
             )}
-            <Text style={[styles.msgText, isUser && styles.userMsgText]}>{item.content}</Text>
+            {!isUser && !item.content && loading ? (
+              <View style={styles.typingRow}>
+                <View style={styles.typingDot} />
+                <View style={[styles.typingDot, { opacity: 0.7 }]} />
+                <View style={[styles.typingDot, { opacity: 0.4 }]} />
+              </View>
+            ) : (
+              <Text style={[styles.msgText, isUser && styles.userMsgText]}>{item.content}</Text>
+            )}
             {/* Generated Image */}
             {hasGenImage && (
               <>
@@ -709,6 +776,8 @@ const styles = StyleSheet.create({
   userBubble: { backgroundColor: COLORS.userBubble, borderRadius: 18, borderTopRightRadius: 4, borderWidth: 0.5, borderColor: 'rgba(255, 255, 255, 0.06)' },
   aiLabel: { fontSize: 11, fontWeight: '700', color: COLORS.primary, marginBottom: 4, letterSpacing: 0.5 },
   msgText: { fontSize: 15, color: COLORS.text, lineHeight: 23 },
+  typingRow: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingVertical: 6, paddingHorizontal: 2 },
+  typingDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: COLORS.primary },
   userMsgText: { color: COLORS.white },
   // TTS Button
   ttsBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 6, marginLeft: 4, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12, backgroundColor: 'rgba(255, 193, 7, 0.08)', alignSelf: 'flex-start', borderWidth: 0.5, borderColor: 'rgba(255, 193, 7, 0.12)' },
