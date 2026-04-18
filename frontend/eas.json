@@ -13,15 +13,24 @@
     },
     "preview": {
       "distribution": "internal",
+      "channel": "preview",
       "android": {
-        "buildType": "apk"
+        "buildType": "apk",
+        "gradleCommand": ":app:assembleRelease"
+      },
+      "env": {
+        "EXPO_PUBLIC_BACKEND_URL": "https://africa-laila-hub.preview.emergentagent.com"
       }
     },
     "production": {
+      "channel": "production",
       "android": {
         "buildType": "app-bundle"
       },
-      "autoIncrement": true
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_BACKEND_URL": "https://africa-laila-hub.preview.emergentagent.com"
+      }
     }
   },
   "submit": {

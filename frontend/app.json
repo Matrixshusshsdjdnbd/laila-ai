@@ -26,11 +26,19 @@
         "backgroundColor": "#0A0908"
       },
       "edgeToEdgeEnabled": true,
+      "softwareKeyboardLayoutMode": "pan",
       "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
         "RECORD_AUDIO",
+        "MODIFY_AUDIO_SETTINGS",
         "CAMERA",
         "READ_EXTERNAL_STORAGE",
-        "WRITE_EXTERNAL_STORAGE"
+        "WRITE_EXTERNAL_STORAGE",
+        "READ_MEDIA_IMAGES",
+        "READ_MEDIA_VIDEO",
+        "VIBRATE",
+        "WAKE_LOCK"
       ]
     },
     "web": {
