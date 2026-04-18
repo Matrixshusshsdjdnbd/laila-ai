@@ -5,6 +5,7 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from emergentintegrations.llm.chat import LlmChat, UserMessage, FileContent
 from emergentintegrations.llm.openai import OpenAISpeechToText, OpenAITextToSpeech
+from emergentintegrations.payments.stripe.checkout import StripeCheckout, CheckoutSessionResponse, CheckoutStatusResponse, CheckoutSessionRequest
 import os
 import logging
 import tempfile
@@ -33,6 +34,7 @@ db = client[os.environ['DB_NAME']]
 # Keys
 EMERGENT_LLM_KEY = os.environ['EMERGENT_LLM_KEY']
 JWT_SECRET = os.environ.get('JWT_SECRET', secrets.token_hex(32))
+STRIPE_API_KEY = os.environ['STRIPE_API_KEY']
 
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
@@ -596,74 +598,141 @@ async def text_to_speech(req: TTSRequest):
         raise HTTPException(status_code=500, detail=f"Speech generation failed: {str(e)}")
 
 # ─── Payment / Premium Routes ────────────────────────────
-# TODO: Replace mock with real PayDunya/CinetPay credentials
 PAYDUNYA_MASTER_KEY = os.environ.get("PAYDUNYA_MASTER_KEY", "mock_master_key")
-PAYDUNYA_PRIVATE_KEY = os.environ.get("PAYDUNYA_PRIVATE_KEY", "mock_private_key")
-PAYDUNYA_TOKEN = os.environ.get("PAYDUNYA_TOKEN", "mock_token")
 PAYMENT_MODE = os.environ.get("PAYMENT_MODE", "mock")  # "mock" or "live"
 
-PLANS = [
-    {"id": "weekly", "name": "Weekly", "price": 500, "currency": "FCFA", "duration_days": 7, "description": "7 days unlimited"},
-    {"id": "monthly", "name": "Monthly", "price": 1500, "currency": "FCFA", "duration_days": 30, "description": "30 days unlimited", "popular": True},
-    {"id": "yearly", "name": "Yearly", "price": 12000, "currency": "FCFA", "duration_days": 365, "description": "12 months unlimited", "savings": "33% savings"},
+# Dual pricing: Africa (FCFA) + International (EUR)
+PLANS_AFRICA = [
+    {"id": "weekly_africa", "name": "Weekly", "price": 500, "price_display": "500 FCFA", "currency": "XOF", "duration_days": 7, "description": "7 days unlimited", "region": "africa"},
+    {"id": "monthly_africa", "name": "Monthly", "price": 1500, "price_display": "1,500 FCFA", "currency": "XOF", "duration_days": 30, "description": "30 days unlimited", "region": "africa", "popular": True},
+    {"id": "yearly_africa", "name": "Yearly", "price": 12000, "price_display": "12,000 FCFA", "currency": "XOF", "duration_days": 365, "description": "12 months unlimited", "region": "africa", "savings": "33% savings"},
 ]
+PLANS_INTERNATIONAL = [
+    {"id": "weekly_intl", "name": "Weekly", "price": 1.99, "price_display": "€1.99", "currency": "eur", "duration_days": 7, "description": "7 days unlimited", "region": "international"},
+    {"id": "monthly_intl", "name": "Monthly", "price": 3.99, "price_display": "€3.99", "currency": "eur", "duration_days": 30, "description": "30 days unlimited", "region": "international", "popular": True},
+    {"id": "yearly_intl", "name": "Yearly", "price": 19.99, "price_display": "€19.99", "currency": "eur", "duration_days": 365, "description": "12 months unlimited", "region": "international", "savings": "58% savings"},
+]
+ALL_PLANS = {p["id"]: p for p in PLANS_AFRICA + PLANS_INTERNATIONAL}
 
 class PaymentInitRequest(BaseModel):
     plan_id: str
-    payment_method: str  # "wave" or "orange_money"
+    payment_method: str  # "wave", "orange_money", "card"
     phone_number: str = ""
+    origin_url: str = ""
 
 @api_router.get("/payment/plans")
 async def get_plans():
-    return {"plans": PLANS, "free_limits": {"chat": "unlimited", "image_gen": FREE_IMAGE_GEN_DAILY, "image_analysis": FREE_IMAGE_ANALYSIS_DAILY, "tts": FREE_TTS_DAILY}}
+    return {
+        "plans_africa": PLANS_AFRICA,
+        "plans_international": PLANS_INTERNATIONAL,
+        "free_limits": {"chat": "unlimited", "image_gen": FREE_IMAGE_GEN_DAILY, "image_analysis": FREE_IMAGE_ANALYSIS_DAILY, "tts": FREE_TTS_DAILY},
+        "payment_methods": {
+            "africa": [{"id": "wave", "name": "Wave", "icon": "wallet"}, {"id": "orange_money", "name": "Orange Money", "icon": "phone-portrait"}],
+            "international": [{"id": "card", "name": "Credit/Debit Card", "icon": "card"}],
+        }
+    }
 
 @api_router.post("/payment/initiate")
 async def initiate_payment(req: PaymentInitRequest, request: Request):
     user = await require_user(request)
-    plan = next((p for p in PLANS if p["id"] == req.plan_id), None)
+    plan = ALL_PLANS.get(req.plan_id)
     if not plan:
         raise HTTPException(status_code=400, detail="Invalid plan")
-    if req.payment_method not in ["wave", "orange_money"]:
-        raise HTTPException(status_code=400, detail="Invalid payment method")
 
     payment_id = f"pay_{uuid.uuid4().hex[:12]}"
     now = datetime.now(timezone.utc).isoformat()
-
     payment = {
-        "payment_id": payment_id,
-        "user_id": user["user_id"],
-        "plan_id": req.plan_id,
-        "amount": plan["price"],
-        "currency": plan["currency"],
-        "payment_method": req.payment_method,
-        "phone_number": req.phone_number,
-        "status": "pending",
-        "created_at": now,
+        "payment_id": payment_id, "user_id": user["user_id"], "plan_id": req.plan_id,
+        "amount": float(plan["price"]), "currency": plan["currency"],
+        "payment_method": req.payment_method, "status": "pending", "created_at": now,
     }
 
-    if PAYMENT_MODE == "live":
-        # TODO: Real PayDunya/CinetPay API call here
-        # Example PayDunya flow:
-        # 1. Create invoice via PayDunya API
-        # 2. Get payment URL
-        # 3. Return URL to frontend for redirect
-        payment["provider_ref"] = "paydunya_invoice_id"
-        payment["payment_url"] = "https://paydunya.com/checkout/..."
-    else:
-        # Mock: auto-approve after creation
-        payment["status"] = "completed"
-        payment["provider_ref"] = f"mock_{payment_id}"
-
-        # Upgrade user to premium
-        expires = datetime.now(timezone.utc) + timedelta(days=plan["duration_days"])
-        await db.users.update_one(
-            {"user_id": user["user_id"]},
-            {"$set": {"tier": "premium", "premium_expires": expires.isoformat(), "premium_plan": req.plan_id}}
+    if req.payment_method == "card":
+        # Stripe checkout for international card payments
+        origin = req.origin_url or str(request.base_url).rstrip('/')
+        webhook_url = f"{origin}/api/webhook/stripe"
+        stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+        success_url = f"{origin}/premium?session_id={{CHECKOUT_SESSION_ID}}"
+        cancel_url = f"{origin}/premium"
+        checkout_req = CheckoutSessionRequest(
+            amount=float(plan["price"]),
+            currency=plan["currency"],
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={"user_id": user["user_id"], "plan_id": req.plan_id, "payment_id": payment_id},
+            payment_methods=["card"],
         )
+        session = await stripe_checkout.create_checkout_session(checkout_req)
+        payment["stripe_session_id"] = session.session_id
+        payment["checkout_url"] = session.url
+        await db.payment_transactions.insert_one({**payment, "stripe_session_id": session.session_id})
+        await db.payments.insert_one(payment)
+        return {k: v for k, v in payment.items() if k != "_id"}
 
-    await db.payments.insert_one(payment)
-    result = {k: v for k, v in payment.items() if k != "_id"}
-    return result
+    elif req.payment_method in ["wave", "orange_money"]:
+        if PAYMENT_MODE == "live":
+            payment["provider_ref"] = "paydunya_pending"
+            payment["status"] = "pending"
+        else:
+            payment["status"] = "completed"
+            payment["provider_ref"] = f"mock_{payment_id}"
+            expires = datetime.now(timezone.utc) + timedelta(days=plan["duration_days"])
+            await db.users.update_one(
+                {"user_id": user["user_id"]},
+                {"$set": {"tier": "premium", "premium_expires": expires.isoformat(), "premium_plan": req.plan_id}}
+            )
+        await db.payment_transactions.insert_one({**{k: v for k, v in payment.items() if k != "_id"}, "payment_id": payment_id})
+        await db.payments.insert_one(payment)
+        return {k: v for k, v in payment.items() if k != "_id"}
+    else:
+        raise HTTPException(status_code=400, detail="Invalid payment method")
+
+@api_router.get("/payment/checkout/status/{session_id}")
+async def checkout_status(session_id: str, request: Request):
+    user = await require_user(request)
+    try:
+        origin = str(request.base_url).rstrip('/')
+        webhook_url = f"{origin}/api/webhook/stripe"
+        stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+        status = await stripe_checkout.get_checkout_status(session_id)
+        # Update payment in DB
+        if status.payment_status == "paid":
+            tx = await db.payment_transactions.find_one({"stripe_session_id": session_id}, {"_id": 0})
+            if tx and tx.get("status") != "completed":
+                plan = ALL_PLANS.get(tx.get("plan_id", ""))
+                days = plan["duration_days"] if plan else 30
+                expires = datetime.now(timezone.utc) + timedelta(days=days)
+                await db.payment_transactions.update_one({"stripe_session_id": session_id}, {"$set": {"status": "completed", "payment_status": "paid"}})
+                await db.payments.update_one({"stripe_session_id": session_id}, {"$set": {"status": "completed"}})
+                await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"tier": "premium", "premium_expires": expires.isoformat(), "premium_plan": tx.get("plan_id")}})
+        return {"status": status.status, "payment_status": status.payment_status, "amount_total": status.amount_total, "currency": status.currency}
+    except Exception as e:
+        logger.error(f"Checkout status error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_router.post("/webhook/stripe")
+async def stripe_webhook(request: Request):
+    try:
+        body = await request.body()
+        origin = str(request.base_url).rstrip('/')
+        webhook_url = f"{origin}/api/webhook/stripe"
+        stripe_checkout = StripeCheckout(api_key=STRIPE_API_KEY, webhook_url=webhook_url)
+        event = await stripe_checkout.handle_webhook(body, request.headers.get("Stripe-Signature"))
+        if event.payment_status == "paid":
+            tx = await db.payment_transactions.find_one({"stripe_session_id": event.session_id}, {"_id": 0})
+            if tx and tx.get("status") != "completed":
+                plan = ALL_PLANS.get(tx.get("plan_id", ""))
+                days = plan["duration_days"] if plan else 30
+                expires = datetime.now(timezone.utc) + timedelta(days=days)
+                await db.payment_transactions.update_one({"stripe_session_id": event.session_id}, {"$set": {"status": "completed", "payment_status": "paid"}})
+                await db.payments.update_one({"stripe_session_id": event.session_id}, {"$set": {"status": "completed"}})
+                user_id = event.metadata.get("user_id", tx.get("user_id"))
+                if user_id:
+                    await db.users.update_one({"user_id": user_id}, {"$set": {"tier": "premium", "premium_expires": expires.isoformat()}})
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Webhook error: {e}")
+        return {"status": "error"}
 
 @api_router.get("/payment/status/{payment_id}")
 async def payment_status(payment_id: str, request: Request):
