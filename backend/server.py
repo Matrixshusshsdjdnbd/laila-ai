@@ -279,6 +279,15 @@ BASE_PROMPT = (
 
 SYSTEM_PROMPTS = {
     "chat": BASE_PROMPT + "You help with everything: work, study, business, translation, daily life.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY + MEMORY_PROMPT,
+    "quick": (
+        "You are LAILA AI in QUICK mode — fast, sharp, high-signal answers.\n"
+        "RULES:\n"
+        "- Keep replies under 6 sentences or 5 bullets.\n"
+        "- No long intros, no filler, no disclaimers.\n"
+        "- Still expert-level: real names, real numbers, real steps.\n"
+        "- Prioritize the most useful info first.\n"
+        + LANG_RULE + CREATOR_IDENTITY
+    ),
     "work": BASE_PROMPT + "Specialized in WORK and CAREER for Africa. CVs, jobs, interviews, LinkedIn, Jobberman, Expat-Dakar.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY + MEMORY_PROMPT,
     "study": BASE_PROMPT + "You're the best tutor — patient, clear, makes everything click. Break problems into steps with African everyday examples.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY + MEMORY_PROMPT,
     "business": BASE_PROMPT + "BUSINESS advisor for Africa. Mobile money (Wave, M-Pesa, Orange Money), WhatsApp commerce, small capital ideas in FCFA.\n" + LANG_RULE + WOLOF_GUIDE + CREATOR_IDENTITY + MEMORY_PROMPT,
@@ -312,11 +321,53 @@ GENERATE_PROMPTS = {
 
 # ─── AI Helper ────────────────────────────────────────────
 
-async def call_ai(system_prompt: str, user_text: str, session_id: str, file_contents=None):
+# Model & per-mode generation config (inspired by LAILA Elite blueprint)
+LLM_MODEL = "gpt-4.1"  # upgraded from gpt-4o for sharper reasoning
+
+MODE_CONFIG = {
+    "quick":      {"max_tokens": 400,  "temperature": 0.6},
+    "voice_call": {"max_tokens": 160,  "temperature": 0.7},
+    "translate":  {"max_tokens": 500,  "temperature": 0.3},
+    "image":      {"max_tokens": 800,  "temperature": 0.5},
+    # expert default for chat/work/study/business/content/life
+    "default":    {"max_tokens": 1400, "temperature": 0.7},
+}
+
+def _get_mode_config(mode: str) -> dict:
+    return MODE_CONFIG.get(mode, MODE_CONFIG["default"])
+
+def enhance_response(text: str, mode: str) -> str:
+    """Post-process model output for polish and consistency."""
+    if not text:
+        return text
+    # Normalize clunky closers into cleaner, more natural ones
+    replacements = {
+        "In conclusion,": "👉 In short:",
+        "In conclusion ": "👉 In short: ",
+        "En conclusion,": "👉 En bref:",
+        "En conclusion ": "👉 En bref: ",
+        "In conclusione,": "👉 In breve:",
+        "In conclusione ": "👉 In breve: ",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    # Strip trailing AI-style disclaimers from voice mode
+    if mode == "voice_call":
+        text = text.replace("*", "").replace("#", "")
+    return text.strip()
+
+async def call_ai(system_prompt: str, user_text: str, session_id: str, file_contents=None, mode: str = "default"):
+    cfg = _get_mode_config(mode)
     chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id, system_message=system_prompt)
-    chat.with_model("openai", "gpt-4o")
+    chat.with_model("openai", LLM_MODEL)
+    # LlmChat builder supports max_tokens; fall back silently if the helper changes API
+    try:
+        chat.with_max_tokens(cfg["max_tokens"])
+    except Exception:
+        pass
     msg = UserMessage(text=user_text, file_contents=file_contents)
-    return await chat.send_message(msg)
+    raw = await chat.send_message(msg)
+    return enhance_response(raw, mode)
 
 async def get_or_create_conversation(user_id: str, mode: str, conversation_id: Optional[str] = None):
     if conversation_id:
@@ -452,7 +503,7 @@ async def chat_endpoint(req: ChatRequest, request: Request):
                     mem_str = ", ".join(f"{k}: {v}" for k, v in memories.items())
                     system_prompt += f"\n\n## WHAT YOU KNOW ABOUT THIS USER:\n{mem_str}\nUse this info naturally. Don't mention you have a 'memory system'.\n"
 
-        response = await call_ai(system_prompt, full_prompt, f"laila-{conv_id}-{uuid.uuid4().hex[:8]}")
+        response = await call_ai(system_prompt, full_prompt, f"laila-{conv_id}-{uuid.uuid4().hex[:8]}", mode=req.mode)
 
         # Extract and save memories
         clean_response, new_memories = extract_memories(response)
@@ -492,7 +543,7 @@ async def chat_image(file: UploadFile = File(...), message: str = Form(default="
         # FileContent: content_type must be "image" to use image_url format in the library
         file_content = FileContent(content_type="image", file_content_base64=img_base64)
         system_prompt = SYSTEM_PROMPTS["image"]
-        response = await call_ai(system_prompt, message, f"laila-img-{uuid.uuid4().hex[:8]}", file_contents=[file_content])
+        response = await call_ai(system_prompt, message, f"laila-img-{uuid.uuid4().hex[:8]}", file_contents=[file_content], mode="image")
         assistant_msg = await save_message(conv_id, "assistant", response)
         title = message[:50] if conv.get("title") == "New Conversation" else conv["title"]
         await db.conversations.update_one({"id": conv_id}, {"$set": {"title": title, "last_message": response[:100], "updated_at": datetime.now(timezone.utc).isoformat()}})
@@ -515,7 +566,7 @@ async def translate_endpoint(req: TranslateRequest, request: Request):
         source = lang_names.get(req.source_lang, req.source_lang)
         target = lang_names.get(req.target_lang, req.target_lang)
         prompt = f"Translate from {source} to {target}. Translation first, then brief explanation.\n\nText: {req.text}"
-        response = await call_ai(SYSTEM_PROMPTS["translate"], prompt, f"laila-tr-{uuid.uuid4().hex[:8]}")
+        response = await call_ai(SYSTEM_PROMPTS["translate"], prompt, f"laila-tr-{uuid.uuid4().hex[:8]}", mode="translate")
         if user:
             await increment_feature_count(user["user_id"], "chat")
         return {"translation": response, "source_lang": req.source_lang, "target_lang": req.target_lang}
@@ -539,7 +590,7 @@ async def generate_endpoint(req: GenerateRequest, request: Request):
         prompt = prompt_template.format(details=req.details)
         await save_message(conv_id, "user", f"[{req.type}] {req.details}")
         system_prompt = SYSTEM_PROMPTS.get("work" if req.type in ["cv", "job_ideas"] else "content", SYSTEM_PROMPTS["chat"])
-        response = await call_ai(system_prompt, prompt, f"laila-gen-{uuid.uuid4().hex[:8]}")
+        response = await call_ai(system_prompt, prompt, f"laila-gen-{uuid.uuid4().hex[:8]}", mode="default")
         assistant_msg = await save_message(conv_id, "assistant", response)
         title = f"{req.type.replace('_', ' ').title()}" if conv.get("title") == "New Conversation" else conv["title"]
         await db.conversations.update_one({"id": conv_id}, {"$set": {"title": title, "last_message": response[:100], "updated_at": datetime.now(timezone.utc).isoformat()}})
