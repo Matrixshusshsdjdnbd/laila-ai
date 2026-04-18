@@ -51,7 +51,12 @@ export default function SettingsScreen() {
         fetch(`${BACKEND_URL}/api/referral`, { headers: h }),
         fetch(`${BACKEND_URL}/api/voices`),
       ]);
-      if (sR.ok) setSettings(await sR.json());
+      if (sR.ok) {
+        const s = await sR.json();
+        setSettings(s);
+        // Mirror voice pref to AsyncStorage for index.tsx/call.tsx to read
+        if (s.tts_voice) await AsyncStorage.setItem('laila_tts_voice', s.tts_voice);
+      }
       if (mR.ok) { const d = await mR.json(); setMemories(d.memories || {}); }
       if (uR.ok) setUser(await uR.json());
       if (rR.ok) setReferral(await rR.json());
@@ -63,6 +68,8 @@ export default function SettingsScreen() {
     setSettings(prev => ({ ...prev, [key]: value }));
     const h = await getHeaders();
     await fetch(`${BACKEND_URL}/api/settings`, { method: 'PUT', headers: h, body: JSON.stringify({ [key]: value }) }).catch(() => {});
+    // Mirror key prefs locally for fast access elsewhere in the app
+    if (key === 'tts_voice') await AsyncStorage.setItem('laila_tts_voice', String(value));
   };
 
   const clearMemory = () => Alert.alert('Clear Memory', 'LAILA will forget everything about you.', [

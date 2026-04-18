@@ -4,7 +4,7 @@ import {
   Platform, SafeAreaView, Alert, ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { useFocusEffect } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 const DEVICE_ID = 'device-' + Math.random().toString(36).substring(2, 10);
@@ -46,6 +46,16 @@ export default function HistoryScreen() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<any[]>([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
+  const router = useRouter();
+
+  const openConversation = (convId: string) => {
+    // Navigate to main chat screen with this conversation pre-loaded
+    router.push({ pathname: '/', params: { cid: convId } });
+  };
+
+  const startNewChat = () => {
+    router.push({ pathname: '/', params: { new: '1' } });
+  };
 
   const loadConversations = async () => {
     try {
@@ -140,7 +150,8 @@ export default function HistoryScreen() {
         <TouchableOpacity
           testID={`history-item-${item.id}`}
           style={[styles.convCard, isExpanded && styles.convCardExpanded]}
-          onPress={() => loadMessages(item.id)}
+          onPress={() => openConversation(item.id)}
+          onLongPress={() => loadMessages(item.id)}
           activeOpacity={0.7}
         >
           <View style={[styles.convIcon, { backgroundColor: modeInfo.color + '20' }]}>
@@ -194,8 +205,14 @@ export default function HistoryScreen() {
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.headerTitle}>History</Text>
-        <Text style={styles.headerSub}>{conversations.length} conversations</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.headerTitle}>Recent chats</Text>
+          <Text style={styles.headerSub}>{conversations.length} conversations — tap to open, long-press to preview</Text>
+        </View>
+        <TouchableOpacity testID="new-chat-btn" onPress={startNewChat} style={styles.newChatBtn} activeOpacity={0.8}>
+          <Ionicons name="add" size={18} color={COLORS.primaryDark} />
+          <Text style={styles.newChatBtnText}>New</Text>
+        </TouchableOpacity>
       </View>
 
       {loading ? (
@@ -210,6 +227,10 @@ export default function HistoryScreen() {
           contentContainerStyle={conversations.length === 0 ? styles.emptyList : styles.listContent}
           ListEmptyComponent={renderEmpty}
           showsVerticalScrollIndicator={false}
+          removeClippedSubviews
+          initialNumToRender={15}
+          maxToRenderPerBatch={10}
+          windowSize={10}
         />
       )}
     </SafeAreaView>
@@ -227,6 +248,9 @@ const styles = StyleSheet.create({
     paddingBottom: 12,
     borderBottomWidth: 0.5,
     borderBottomColor: COLORS.muted,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
   },
   headerTitle: {
     fontSize: 24,
@@ -234,9 +258,23 @@ const styles = StyleSheet.create({
     color: COLORS.white,
   },
   headerSub: {
-    fontSize: 13,
+    fontSize: 12,
     color: COLORS.mutedFg,
     marginTop: 2,
+  },
+  newChatBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+  },
+  newChatBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.primaryDark,
   },
   loadingContainer: {
     flex: 1,

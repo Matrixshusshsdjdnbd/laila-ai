@@ -152,6 +152,7 @@ class GenerateRequest(BaseModel):
 class TTSRequest(BaseModel):
     text: str
     voice: str = "nova"
+    speed: float = 1.0
 
 class ImageGenRequest(BaseModel):
     prompt: str
@@ -170,9 +171,12 @@ class ReferralApplyRequest(BaseModel):
 
 # Voice styles
 VOICE_STYLES = [
-    {"id": "nova", "name": "Nova", "desc": "Warm female voice", "gender": "female"},
-    {"id": "onyx", "name": "Onyx", "desc": "Strong male voice", "gender": "male"},
-    {"id": "alloy", "name": "Alloy", "desc": "Smart neutral voice", "gender": "neutral"},
+    {"id": "nova",    "name": "Nova",    "desc": "Warm female — friendly, clear",  "gender": "female"},
+    {"id": "shimmer", "name": "Shimmer", "desc": "Soft female — calm, welcoming",  "gender": "female"},
+    {"id": "onyx",    "name": "Onyx",    "desc": "Strong male — deep, confident",  "gender": "male"},
+    {"id": "echo",    "name": "Echo",    "desc": "Calm male — steady, natural",    "gender": "male"},
+    {"id": "fable",   "name": "Fable",   "desc": "British male — elegant, clear",  "gender": "male"},
+    {"id": "alloy",   "name": "Alloy",   "desc": "Neutral — smart, versatile",     "gender": "neutral"},
 ]
 
 # ─── System Prompts ───────────────────────────────────────
@@ -786,7 +790,7 @@ async def text_to_speech(req: TTSRequest):
             raise HTTPException(status_code=400, detail="Text is required")
         text = req.text.strip()[:4096]
         tts = OpenAITextToSpeech(api_key=EMERGENT_LLM_KEY)
-        audio_base64 = await tts.generate_speech_base64(text=text, model="tts-1", voice=req.voice, response_format="mp3", speed=1.0)
+        audio_base64 = await tts.generate_speech_base64(text=text, model="tts-1", voice=req.voice, response_format="mp3", speed=max(0.5, min(req.speed, 2.0)))
         return {"audio": audio_base64, "format": "mp3"}
     except HTTPException:
         raise

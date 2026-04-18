@@ -1,239 +1,264 @@
 """
-Backend test for LAILA AI streaming chat endpoint.
-Scope: /api/chat/stream (SSE) + persistence + regression /api/chat.
+Scoped regression + new-feature backend test for LAILA AI.
+Tests:
+  1) GET /api/voices — must return exactly 6 voices with correct ids/names/genders.
+  2) POST /api/tts with speed parameter (4 sub-cases).
+  3) POST /api/chat/stream — SSE regression.
+  4) POST /api/chat — non-stream regression.
+  5) GET /api/conversations?device_id=test-regression — persistence regression.
 """
 import json
 import sys
-import time
+import base64
 import requests
 
-BASE_URL = "https://africa-laila-hub.preview.emergentagent.com/api"
-TIMEOUT = 120
+BASE = "https://africa-laila-hub.preview.emergentagent.com/api"
+TIMEOUT = 60
+
+results = []  # list of (name, passed, details)
 
 
-def parse_sse_stream(resp):
-    """Parse SSE response. Returns list of parsed JSON events and raw chunk count."""
-    events = []
-    raw_chunks = 0
-    parse_errors = []
-    buffer = ""
-    for line in resp.iter_lines(decode_unicode=True, chunk_size=1):
-        if line is None:
-            continue
-        raw_chunks += 1
-        if not line:
-            continue
-        if line.startswith("data: "):
-            payload = line[6:]
+def record(name, passed, details=""):
+    results.append((name, passed, details))
+    icon = "PASS" if passed else "FAIL"
+    print(f"[{icon}] {name}")
+    if details:
+        print(f"       {details}")
+
+
+# ─── Test 1: GET /api/voices ─────────────────────────────
+def test_voices():
+    expected = {
+        "nova":    ("Nova",    "female"),
+        "shimmer": ("Shimmer", "female"),
+        "onyx":    ("Onyx",    "male"),
+        "echo":    ("Echo",    "male"),
+        "fable":   ("Fable",   "male"),
+        "alloy":   ("Alloy",   "neutral"),
+    }
+    try:
+        r = requests.get(f"{BASE}/voices", timeout=TIMEOUT)
+        if r.status_code != 200:
+            record("GET /api/voices status 200", False, f"HTTP {r.status_code}: {r.text[:200]}")
+            return
+        body = r.json()
+        voices = body.get("voices")
+        if not isinstance(voices, list):
+            record("GET /api/voices returns voices list", False, f"body={body}")
+            return
+
+        print("       Listed voices:")
+        for v in voices:
+            print(f"         - id={v.get('id')!r:12} name={v.get('name')!r:12} gender={v.get('gender')!r:10} desc={v.get('desc')!r}")
+
+        if len(voices) != 6:
+            record("GET /api/voices returns exactly 6 voices", False, f"got {len(voices)}")
+            return
+        record("GET /api/voices returns exactly 6 voices", True, "6 voices returned")
+
+        required_fields = {"id", "name", "desc", "gender"}
+        all_fields_ok = True
+        missing_details = []
+        for v in voices:
+            missing = required_fields - set(v.keys())
+            if missing:
+                all_fields_ok = False
+                missing_details.append(f"voice {v.get('id')} missing {missing}")
+        record("Each voice has id/name/desc/gender", all_fields_ok, "; ".join(missing_details) if missing_details else "all fields present")
+
+        by_id = {v["id"]: v for v in voices if "id" in v}
+        mismatches = []
+        for vid, (ename, egender) in expected.items():
+            if vid not in by_id:
+                mismatches.append(f"missing id={vid}")
+                continue
+            v = by_id[vid]
+            if v.get("name") != ename:
+                mismatches.append(f"{vid}: name={v.get('name')} expected {ename}")
+            if v.get("gender") != egender:
+                mismatches.append(f"{vid}: gender={v.get('gender')} expected {egender}")
+        record(
+            "Voices match expected set (Nova/Shimmer/Onyx/Echo/Fable/Alloy)",
+            len(mismatches) == 0,
+            "; ".join(mismatches) if mismatches else "all 6 voices match expected spec",
+        )
+    except Exception as e:
+        record("GET /api/voices", False, f"exception: {e}")
+
+
+# ─── Test 2: POST /api/tts with speed ─────────────────────
+def _tts_call(payload, label, expect_ok=True):
+    try:
+        r = requests.post(f"{BASE}/tts", json=payload, timeout=TIMEOUT)
+        if expect_ok:
+            if r.status_code != 200:
+                record(f"POST /api/tts {label}", False, f"HTTP {r.status_code}: {r.text[:300]}")
+                return
+            body = r.json()
+            audio = body.get("audio")
+            fmt = body.get("format")
+            if not audio or not isinstance(audio, str):
+                record(f"POST /api/tts {label}", False, f"no audio in response: {body}")
+                return
             try:
-                events.append(json.loads(payload))
-            except Exception as e:
-                parse_errors.append({"line": payload[:200], "error": str(e)})
-    return events, raw_chunks, parse_errors
+                raw = base64.b64decode(audio, validate=False)
+                size = len(raw)
+            except Exception as de:
+                record(f"POST /api/tts {label}", False, f"audio not valid base64: {de}")
+                return
+            record(f"POST /api/tts {label}", True, f"HTTP 200, format={fmt}, audio_bytes={size}, base64_chars={len(audio)}")
+        else:
+            if 400 <= r.status_code < 600:
+                record(f"POST /api/tts {label} (invalid voice → graceful error)", True, f"HTTP {r.status_code}: {r.text[:150]}")
+            else:
+                record(f"POST /api/tts {label} (invalid voice → graceful error)", False, f"unexpected HTTP {r.status_code}: {r.text[:200]}")
+    except requests.exceptions.RequestException as e:
+        if not expect_ok:
+            record(f"POST /api/tts {label} (invalid voice)", False, f"connection error (not graceful): {e}")
+        else:
+            record(f"POST /api/tts {label}", False, f"request exception: {e}")
 
 
-def stream_request(message, mode="chat", conversation_id=None):
-    body = {"message": message, "mode": mode, "conversation_id": conversation_id}
-    headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
-    t0 = time.time()
-    resp = requests.post(f"{BASE_URL}/chat/stream", json=body, headers=headers, stream=True, timeout=TIMEOUT)
-    return resp, t0
+def test_tts():
+    _tts_call({"text": "Hello, testing voice speed.", "voice": "nova"}, "baseline nova (no speed)", expect_ok=True)
+    _tts_call({"text": "Hello, testing voice speed.", "voice": "onyx", "speed": 1.15}, "onyx speed=1.15", expect_ok=True)
+    _tts_call({"text": "Testing echo.", "voice": "echo", "speed": 1.1}, "echo speed=1.1", expect_ok=True)
+    _tts_call({"text": "Test", "voice": "invalid_voice_xyz"}, "invalid_voice_xyz", expect_ok=False)
 
 
-def test_1_basic_stream():
-    print("\n=== TEST 1: Basic /api/chat/stream (mode=chat) ===")
-    resp, t0 = stream_request("Hello, introduce yourself in one short paragraph.", mode="chat")
-    print(f"Status: {resp.status_code}")
-    print(f"Content-Type: {resp.headers.get('Content-Type')}")
-    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text[:500]}"
-    ct = resp.headers.get("Content-Type", "")
-    assert "text/event-stream" in ct, f"Expected SSE content-type, got {ct}"
+# ─── Test 3: SSE streaming regression ─────────────────────
+def test_stream():
+    try:
+        r = requests.post(
+            f"{BASE}/chat/stream",
+            json={"message": "Say hi in one short sentence.", "mode": "chat", "conversation_id": None},
+            stream=True,
+            timeout=TIMEOUT,
+        )
+        if r.status_code != 200:
+            record("POST /api/chat/stream status 200", False, f"HTTP {r.status_code}: {r.text[:200]}")
+            return
+        ctype = r.headers.get("Content-Type", "")
+        if "text/event-stream" not in ctype:
+            record("POST /api/chat/stream Content-Type SSE", False, f"got {ctype}")
+        else:
+            record("POST /api/chat/stream Content-Type SSE", True, ctype)
 
-    events, raw_chunks, parse_errors = parse_sse_stream(resp)
-    elapsed = time.time() - t0
+        delta_count = 0
+        delta_chars = 0
+        done_seen = False
+        conversation_id = None
+        error_events = 0
+        buffer = ""
+        for raw_chunk in r.iter_content(chunk_size=None, decode_unicode=True):
+            if not raw_chunk:
+                continue
+            buffer += raw_chunk
+            while "\n\n" in buffer:
+                frame, buffer = buffer.split("\n\n", 1)
+                for line in frame.splitlines():
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    payload_text = line[len("data:"):].strip()
+                    if not payload_text:
+                        continue
+                    try:
+                        evt = json.loads(payload_text)
+                    except json.JSONDecodeError:
+                        error_events += 1
+                        continue
+                    if "conversation_id" in evt and not conversation_id:
+                        conversation_id = evt.get("conversation_id")
+                    if evt.get("type") == "delta" or "delta" in evt:
+                        d = evt.get("delta") or evt.get("content") or ""
+                        if d:
+                            delta_count += 1
+                            delta_chars += len(d)
+                    if evt.get("done") is True or evt.get("type") == "done":
+                        done_seen = True
+                    if evt.get("type") == "error" or evt.get("error"):
+                        error_events += 1
+            if done_seen:
+                break
+        r.close()
 
-    print(f"Raw lines (chunks incl blank separators): {raw_chunks}")
-    print(f"Parsed SSE events: {len(events)}")
-    print(f"Parse errors: {len(parse_errors)}")
-    if parse_errors:
-        print(f"  Errors: {parse_errors[:3]}")
-
-    # Check error events
-    error_events = [e for e in events if "error" in e]
-    if error_events:
-        print(f"ERROR events: {error_events}")
-        raise AssertionError(f"Got error events: {error_events}")
-
-    # First event should have conversation_id
-    assert len(events) > 0, "No events received"
-    first = events[0]
-    assert "conversation_id" in first, f"First event missing conversation_id: {first}"
-    conv_id = first["conversation_id"]
-    print(f"First event conversation_id: {conv_id}")
-
-    # Count delta chunks & concatenate
-    delta_events = [e for e in events if "delta" in e]
-    full_text = "".join(e["delta"] for e in delta_events)
-    print(f"Delta chunks: {len(delta_events)}")
-    print(f"Full concatenated assistant text ({len(full_text)} chars):")
-    print(f"  >>> {full_text[:400]}{'...' if len(full_text) > 400 else ''}")
-
-    # Final event
-    done_events = [e for e in events if e.get("done") is True]
-    assert done_events, "No done event received"
-    done = done_events[-1]
-    assert "message" in done, f"Done event missing 'message': {done}"
-    msg = done["message"]
-    assert msg.get("id"), "message.id missing"
-    assert msg.get("conversation_id") == conv_id, f"conv_id mismatch: {msg}"
-    assert msg.get("role") == "assistant", f"role != assistant: {msg}"
-    assert msg.get("content"), "message.content empty"
-    assert msg.get("created_at"), "created_at missing"
-
-    print(f"Time elapsed: {elapsed:.2f}s")
-    print(f"TEST 1 PASS — conv_id={conv_id}, delta_chunks={len(delta_events)}, total_chars={len(full_text)}")
-    return conv_id, full_text, len(delta_events)
-
-
-def test_2_followup_context(conv_id):
-    print(f"\n=== TEST 2: Follow-up with same conversation_id ({conv_id}) ===")
-    resp, t0 = stream_request("What did I just say to you?", mode="chat", conversation_id=conv_id)
-    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
-    events, raw_chunks, parse_errors = parse_sse_stream(resp)
-    print(f"Raw lines: {raw_chunks}, Events: {len(events)}, Parse errors: {len(parse_errors)}")
-    error_events = [e for e in events if "error" in e]
-    assert not error_events, f"error events: {error_events}"
-    first = events[0]
-    assert first.get("conversation_id") == conv_id, f"conv_id mismatch: expected {conv_id}, got {first}"
-    delta_events = [e for e in events if "delta" in e]
-    full_text = "".join(e["delta"] for e in delta_events)
-    print(f"Delta chunks: {len(delta_events)}, chars: {len(full_text)}")
-    print(f"Assistant reply: >>> {full_text[:500]}")
-    # Context check: look for "introduce", "hello", "yourself", "said"
-    lc = full_text.lower()
-    keywords = ["introduce", "hello", "yourself", "said", "paragraph", "asked"]
-    found = [k for k in keywords if k in lc]
-    print(f"Context keywords found: {found}")
-    context_ok = len(found) >= 1
-    assert context_ok, f"Assistant did not reference previous turn. Text: {full_text[:400]}"
-    done_events = [e for e in events if e.get("done") is True]
-    assert done_events, "No done event"
-    print(f"TEST 2 PASS — context preserved, delta_chunks={len(delta_events)}")
-    return full_text, len(delta_events)
+        details = f"deltas={delta_count}, chars={delta_chars}, done={done_seen}, conv_id={bool(conversation_id)}, errors={error_events}"
+        passed = delta_count > 0 and done_seen and bool(conversation_id) and error_events == 0
+        record("POST /api/chat/stream SSE regression", passed, details)
+    except Exception as e:
+        record("POST /api/chat/stream SSE regression", False, f"exception: {e}")
 
 
-def test_3_persistence(conv_id):
-    print(f"\n=== TEST 3: GET /api/conversations/{conv_id}/messages ===")
-    resp = requests.get(f"{BASE_URL}/conversations/{conv_id}/messages", timeout=30)
-    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text[:500]}"
-    data = resp.json()
-    messages = data.get("messages", [])
-    print(f"Total messages: {len(messages)}")
-    for i, m in enumerate(messages):
-        print(f"  [{i}] role={m.get('role')} content_len={len(m.get('content', ''))} preview={m.get('content', '')[:80]!r}")
-
-    assert len(messages) >= 4, f"Expected ≥4 messages, got {len(messages)}"
-    roles = [m.get("role") for m in messages]
-    user_count = roles.count("user")
-    assistant_count = roles.count("assistant")
-    assert user_count >= 2, f"Expected ≥2 user msgs, got {user_count}"
-    assert assistant_count >= 2, f"Expected ≥2 assistant msgs, got {assistant_count}"
-    for m in messages:
-        assert m.get("content"), f"Empty content in message: {m}"
-        assert m.get("role") in ("user", "assistant"), f"Unexpected role: {m}"
-    print(f"TEST 3 PASS — {user_count} user + {assistant_count} assistant messages persisted.")
-
-
-def test_4_non_streaming_regression():
-    print("\n=== TEST 4: Regression /api/chat (non-stream) ===")
-    body = {"message": "Say 'hello' in one word.", "mode": "quick", "conversation_id": None}
-    resp = requests.post(f"{BASE_URL}/chat", json=body, timeout=TIMEOUT)
-    print(f"Status: {resp.status_code}")
-    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text[:500]}"
-    data = resp.json()
-    assert "conversation_id" in data, f"missing conv_id: {data}"
-    msg = data.get("message", {})
-    assert msg.get("role") == "assistant", f"role wrong: {msg}"
-    assert msg.get("content"), "content empty"
-    print(f"conv_id={data['conversation_id']}, content={msg['content'][:200]!r}")
-    print("TEST 4 PASS — non-stream /api/chat still works.")
+# ─── Test 4: Non-stream chat regression ───────────────────
+def test_chat_non_stream():
+    try:
+        r = requests.post(
+            f"{BASE}/chat",
+            json={"message": "Hello.", "mode": "chat", "conversation_id": None},
+            timeout=TIMEOUT,
+        )
+        if r.status_code != 200:
+            record("POST /api/chat non-stream", False, f"HTTP {r.status_code}: {r.text[:300]}")
+            return
+        body = r.json()
+        conv_id = body.get("conversation_id")
+        msg = body.get("message")
+        has_content = bool(msg and (msg.get("content") if isinstance(msg, dict) else msg))
+        passed = bool(conv_id) and has_content
+        record(
+            "POST /api/chat non-stream",
+            passed,
+            f"conv_id={conv_id}, has_message={has_content}, msg_preview={(str(msg)[:80] if msg else '')!r}",
+        )
+    except Exception as e:
+        record("POST /api/chat non-stream", False, f"exception: {e}")
 
 
-def test_5_quick_vs_chat_length():
-    print("\n=== TEST 5: mode=quick should produce shorter output than mode=chat ===")
-    q_prompt = "Explain how photosynthesis works."
-    # chat mode
-    resp_c, _ = stream_request(q_prompt, mode="chat")
-    assert resp_c.status_code == 200
-    events_c, _, _ = parse_sse_stream(resp_c)
-    deltas_c = [e for e in events_c if "delta" in e]
-    text_c = "".join(e["delta"] for e in deltas_c)
-    err_c = [e for e in events_c if "error" in e]
-    assert not err_c, f"chat mode errors: {err_c}"
-
-    # quick mode
-    resp_q, _ = stream_request(q_prompt, mode="quick")
-    assert resp_q.status_code == 200
-    events_q, _, _ = parse_sse_stream(resp_q)
-    deltas_q = [e for e in events_q if "delta" in e]
-    text_q = "".join(e["delta"] for e in deltas_q)
-    err_q = [e for e in events_q if "error" in e]
-    assert not err_q, f"quick mode errors: {err_q}"
-
-    print(f"chat mode: {len(deltas_c)} chunks, {len(text_c)} chars")
-    print(f"quick mode: {len(deltas_q)} chunks, {len(text_q)} chars")
-    print(f"chat sample: {text_c[:200]}...")
-    print(f"quick sample: {text_q[:200]}...")
-    assert len(text_q) < len(text_c), f"quick ({len(text_q)}) not shorter than chat ({len(text_c)})"
-    print("TEST 5 PASS — quick mode shorter than chat mode.")
+# ─── Test 5: Conversations persistence ───────────────────
+def test_conversations_list():
+    try:
+        r = requests.get(f"{BASE}/conversations", params={"device_id": "test-regression"}, timeout=TIMEOUT)
+        if r.status_code != 200:
+            record("GET /api/conversations?device_id=test-regression", False, f"HTTP {r.status_code}: {r.text[:200]}")
+            return
+        body = r.json()
+        if "conversations" not in body:
+            record("GET /api/conversations?device_id=test-regression", False, f"missing 'conversations' field: {body}")
+            return
+        if not isinstance(body["conversations"], list):
+            record("GET /api/conversations?device_id=test-regression", False, f"'conversations' not a list: {type(body['conversations'])}")
+            return
+        record(
+            "GET /api/conversations?device_id=test-regression",
+            True,
+            f"conversations array returned (count={len(body['conversations'])})",
+        )
+    except Exception as e:
+        record("GET /api/conversations?device_id=test-regression", False, f"exception: {e}")
 
 
 def main():
-    results = {}
-    try:
-        conv_id, _, _ = test_1_basic_stream()
-        results["test_1_basic_stream"] = "PASS"
-    except Exception as e:
-        print(f"TEST 1 FAIL: {e}")
-        results["test_1_basic_stream"] = f"FAIL: {e}"
-        sys.exit(1)
+    print(f"=== LAILA AI backend regression tests ===\nBASE={BASE}\n")
+    test_voices()
+    print()
+    test_tts()
+    print()
+    test_stream()
+    print()
+    test_chat_non_stream()
+    print()
+    test_conversations_list()
 
-    try:
-        test_2_followup_context(conv_id)
-        results["test_2_followup_context"] = "PASS"
-    except Exception as e:
-        print(f"TEST 2 FAIL: {e}")
-        results["test_2_followup_context"] = f"FAIL: {e}"
-
-    try:
-        test_3_persistence(conv_id)
-        results["test_3_persistence"] = "PASS"
-    except Exception as e:
-        print(f"TEST 3 FAIL: {e}")
-        results["test_3_persistence"] = f"FAIL: {e}"
-
-    try:
-        test_4_non_streaming_regression()
-        results["test_4_non_stream_regression"] = "PASS"
-    except Exception as e:
-        print(f"TEST 4 FAIL: {e}")
-        results["test_4_non_stream_regression"] = f"FAIL: {e}"
-
-    try:
-        test_5_quick_vs_chat_length()
-        results["test_5_quick_vs_chat"] = "PASS"
-    except Exception as e:
-        print(f"TEST 5 FAIL: {e}")
-        results["test_5_quick_vs_chat"] = f"FAIL: {e}"
-
-    print("\n\n=== FINAL SUMMARY ===")
-    for k, v in results.items():
-        print(f"  {k}: {v}")
-    failed = [k for k, v in results.items() if not v.startswith("PASS")]
-    if failed:
-        print(f"\n{len(failed)} test(s) failed.")
-        sys.exit(1)
-    print("\nALL TESTS PASS")
+    print("\n=== SUMMARY ===")
+    passed = sum(1 for _, p, _ in results if p)
+    failed = sum(1 for _, p, _ in results if not p)
+    print(f"passed={passed}  failed={failed}  total={len(results)}")
+    for name, p, det in results:
+        print(f"  [{'PASS' if p else 'FAIL'}] {name}")
+        if not p and det:
+            print(f"         {det}")
+    sys.exit(0 if failed == 0 else 1)
 
 
 if __name__ == "__main__":

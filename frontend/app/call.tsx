@@ -130,19 +130,20 @@ export default function CallScreen() {
       // Step 3: TTS — limit to 500 chars for speed in voice mode
       setState('speaking');
       const ttsText = aiText.length > 500 ? aiText.substring(0, 497) + '...' : aiText;
+      const preferredVoice = (await AsyncStorage.getItem('laila_tts_voice')) || 'nova';
       const ttsRes = await fetch(`${BACKEND_URL}/api/tts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: ttsText, voice: 'nova' }),
+        body: JSON.stringify({ text: ttsText, voice: preferredVoice, speed: 1.15 }),
       });
       if (!ttsRes.ok) throw new Error('TTS failed');
       const ttsData = await ttsRes.json();
 
-      // Step 4: Play audio
+      // Step 4: Play audio (slightly faster playback rate for snappier conversation)
       await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true });
       const { sound } = await Audio.Sound.createAsync(
         { uri: `data:audio/mp3;base64,${ttsData.audio}` },
-        { shouldPlay: true }
+        { shouldPlay: true, rate: 1.05, shouldCorrectPitch: true }
       );
       soundRef.current = sound;
 

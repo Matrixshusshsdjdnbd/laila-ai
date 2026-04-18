@@ -11,7 +11,7 @@ import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import * as MediaLibrary from 'expo-media-library';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
@@ -71,10 +71,44 @@ export default function ChatScreen() {
   const soundRef = useRef<Audio.Sound | null>(null);
   const durationInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const router = useRouter();
+  const params = useLocalSearchParams<{ cid?: string; new?: string }>();
 
   React.useEffect(() => {
     AsyncStorage.getItem('laila_auth_token').then(t => setAuthToken(t));
   }, []);
+
+  // Deep-link handler: load a selected conversation OR start a new chat
+  React.useEffect(() => {
+    (async () => {
+      if (params.new === '1') {
+        // Start fresh — DO NOT delete anything; just clear local state
+        setMessages([]);
+        setConversationId(null);
+        // Clear the param so it doesn't re-fire
+        router.setParams({ new: undefined, cid: undefined });
+        return;
+      }
+      const cid = params.cid;
+      if (cid && cid !== conversationId) {
+        try {
+          setLoading(true);
+          const res = await fetch(`${BACKEND_URL}/api/conversations/${cid}/messages`);
+          if (res.ok) {
+            const data = await res.json();
+            const normalized = (data.messages || []).map((m: any) => ({
+              id: m.id,
+              role: m.role,
+              content: m.content,
+              created_at: m.created_at,
+            }));
+            setMessages(normalized);
+            setConversationId(cid);
+            setTimeout(() => { try { flatListRef.current?.scrollToEnd({ animated: false }); } catch {} }, 120);
+          }
+        } catch {} finally { setLoading(false); }
+      }
+    })();
+  }, [params.cid, params.new]);
 
   const authHeaders = () => authToken ? { Authorization: `Bearer ${authToken}` } : {};
 
@@ -223,10 +257,13 @@ export default function ChatScreen() {
 
       setLoadingTtsId(messageId);
 
+      // Read user's preferred voice from AsyncStorage (set by Settings screen)
+      const preferredVoice = (await AsyncStorage.getItem('laila_tts_voice')) || 'nova';
+
       const res = await fetch(`${BACKEND_URL}/api/tts`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: text.substring(0, 4096), voice: 'nova' }),
+        body: JSON.stringify({ text: text.substring(0, 4096), voice: preferredVoice, speed: 1.1 }),
       });
 
       if (!res.ok) throw new Error('TTS failed');
@@ -239,7 +276,7 @@ export default function ChatScreen() {
 
       const { sound } = await Audio.Sound.createAsync(
         { uri: `data:audio/mp3;base64,${data.audio}` },
-        { shouldPlay: true }
+        { shouldPlay: true, rate: 1.05, shouldCorrectPitch: true }
       );
 
       soundRef.current = sound;
@@ -658,7 +695,13 @@ export default function ChatScreen() {
           contentContainerStyle={messages.length === 0 ? styles.emptyList : styles.msgList}
           ListEmptyComponent={renderEmpty}
           onContentSizeChange={() => { if (messages.length > 0) flatListRef.current?.scrollToEnd({ animated: true }); }}
-          showsVerticalScrollIndicator={false} />
+          showsVerticalScrollIndicator={false}
+          removeClippedSubviews
+          initialNumToRender={12}
+          maxToRenderPerBatch={8}
+          windowSize={8}
+          updateCellsBatchingPeriod={30}
+        />
 
         {loading && (
           <View style={styles.loadingRow}>
