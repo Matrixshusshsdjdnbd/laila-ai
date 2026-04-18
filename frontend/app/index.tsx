@@ -7,6 +7,9 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system';
+import * as Sharing from 'expo-sharing';
+import * as MediaLibrary from 'expo-media-library';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter } from 'expo-router';
 
@@ -34,6 +37,7 @@ type Message = {
   content: string;
   created_at: string;
   image_base64?: string;
+  user_image_uri?: string;
 };
 
 const QUICK_ACTIONS = [
@@ -278,18 +282,23 @@ export default function ChatScreen() {
         if (!perm.granted) { Alert.alert('Permission needed', 'Please allow camera access.'); return; }
       }
       const result = useCamera
-        ? await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.7, base64: false })
-        : await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.7, base64: false });
+        ? await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], quality: 0.6, base64: true })
+        : await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.6, base64: true });
       if (result.canceled || !result.assets?.[0]) return;
       const asset = result.assets[0];
-      sendImage(asset.uri, input.trim() || 'What is in this image? Describe and help me.');
+      sendImage(asset.uri, asset.base64 || '', input.trim() || 'What is in this image? Describe and help me.');
     } catch (err) {
       Alert.alert('Error', 'Could not pick image.');
     }
   };
 
-  const sendImage = async (uri: string, message: string) => {
-    const userMsg: Message = { id: Date.now().toString(), role: 'user', content: `[Photo] ${message}`, created_at: new Date().toISOString() };
+  const sendImage = async (uri: string, base64Preview: string, message: string) => {
+    // Show user message with image preview immediately
+    const userMsg: Message = {
+      id: Date.now().toString(), role: 'user', content: message,
+      created_at: new Date().toISOString(),
+      user_image_uri: base64Preview ? `data:image/jpeg;base64,${base64Preview}` : uri,
+    };
     setMessages(prev => [...prev, userMsg]);
     setInput('');
     setLoading(true);
@@ -313,7 +322,7 @@ export default function ChatScreen() {
   };
 
   const showImageOptions = () => {
-    Alert.alert('Send Image', 'Choose image source', [
+    Alert.alert('Photo', 'Choose source', [
       { text: 'Camera', onPress: () => pickImage(true) },
       { text: 'Gallery', onPress: () => pickImage(false) },
       { text: 'Cancel', style: 'cancel' },
@@ -382,11 +391,32 @@ export default function ChatScreen() {
     setMode('chat');
   };
 
+  // ─── Save & Share Image ────────────────────────────────
+  const saveImage = async (base64Data: string) => {
+    try {
+      const perm = await MediaLibrary.requestPermissionsAsync();
+      if (!perm.granted) { Alert.alert('Permission needed', 'Allow photo library access to save images.'); return; }
+      const fileUri = FileSystem.cacheDirectory + `laila_image_${Date.now()}.png`;
+      await FileSystem.writeAsStringAsync(fileUri, base64Data, { encoding: FileSystem.EncodingType.Base64 });
+      await MediaLibrary.saveToLibraryAsync(fileUri);
+      Alert.alert('Saved!', 'Image saved to your gallery.');
+    } catch { Alert.alert('Error', 'Could not save image.'); }
+  };
+
+  const shareImage = async (base64Data: string) => {
+    try {
+      const fileUri = FileSystem.cacheDirectory + `laila_share_${Date.now()}.png`;
+      await FileSystem.writeAsStringAsync(fileUri, base64Data, { encoding: FileSystem.EncodingType.Base64 });
+      await Sharing.shareAsync(fileUri, { mimeType: 'image/png' });
+    } catch { Alert.alert('Error', 'Could not share image.'); }
+  };
+
   const renderMessage = ({ item }: { item: Message }) => {
     const isUser = item.role === 'user';
     const isPlaying = playingId === item.id;
     const isTtsLoading = loadingTtsId === item.id;
-    const hasImage = item.image_base64;
+    const hasGenImage = item.image_base64;
+    const hasUserImage = item.user_image_uri;
 
     return (
       <View testID={`message-${item.id}`} style={[styles.msgRow, isUser ? styles.msgRowUser : styles.msgRowAi]}>
@@ -398,18 +428,30 @@ export default function ChatScreen() {
         <View style={{ maxWidth: '100%' }}>
           <View style={[styles.bubble, isUser ? styles.userBubble : styles.aiBubble]}>
             {!isUser && <Text style={styles.aiLabel}>LAILA</Text>}
+            {/* User-sent photo preview */}
+            {hasUserImage && (
+              <Image source={{ uri: hasUserImage }} style={styles.userImage} resizeMode="cover" />
+            )}
             <Text style={[styles.msgText, isUser && styles.userMsgText]}>{item.content}</Text>
-            {/* Generated Image Display */}
-            {hasImage && (
-              <Image
-                source={{ uri: `data:image/png;base64,${item.image_base64}` }}
-                style={styles.genImage}
-                resizeMode="contain"
-              />
+            {/* Generated Image */}
+            {hasGenImage && (
+              <>
+                <Image source={{ uri: `data:image/png;base64,${item.image_base64}` }} style={styles.genImage} resizeMode="contain" />
+                <View style={styles.imgActions}>
+                  <TouchableOpacity testID={`save-img-${item.id}`} style={styles.imgActionBtn} onPress={() => saveImage(item.image_base64!)}>
+                    <Ionicons name="download-outline" size={18} color={COLORS.primary} />
+                    <Text style={styles.imgActionText}>Save</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity testID={`share-img-${item.id}`} style={styles.imgActionBtn} onPress={() => shareImage(item.image_base64!)}>
+                    <Ionicons name="share-outline" size={18} color={COLORS.primary} />
+                    <Text style={styles.imgActionText}>Share</Text>
+                  </TouchableOpacity>
+                </View>
+              </>
             )}
           </View>
           {/* TTS Speaker Button */}
-          {!isUser && !hasImage && (
+          {!isUser && !hasGenImage && (
             <TouchableOpacity
               testID={`tts-btn-${item.id}`}
               style={[styles.ttsBtn, isPlaying && styles.ttsBtnPlaying]}
@@ -630,8 +672,12 @@ const styles = StyleSheet.create({
   ttsBtnPlaying: { backgroundColor: 'rgba(239, 68, 68, 0.1)', borderColor: 'rgba(239, 68, 68, 0.2)' },
   ttsText: { fontSize: 12, color: COLORS.primary, fontWeight: '600' },
   ttsTextPlaying: { color: COLORS.recording },
-  // Generated Image
+  // Images
+  userImage: { width: '100%', height: 180, borderRadius: 10, marginBottom: 8 },
   genImage: { width: '100%', height: 250, borderRadius: 12, marginTop: 10 },
+  imgActions: { flexDirection: 'row', gap: 12, marginTop: 8, justifyContent: 'flex-start' },
+  imgActionBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10, backgroundColor: 'rgba(255, 193, 7, 0.1)', borderWidth: 0.5, borderColor: 'rgba(255, 193, 7, 0.15)' },
+  imgActionText: { fontSize: 12, color: COLORS.primary, fontWeight: '600' },
   // Loading
   loadingRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingHorizontal: 16, paddingVertical: 8 },
   loadingBubble: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: COLORS.aiBubble, borderRadius: 14, paddingHorizontal: 16, paddingVertical: 10, borderWidth: 0.5, borderColor: 'rgba(255, 193, 7, 0.15)' },

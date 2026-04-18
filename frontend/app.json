@@ -14,7 +14,8 @@
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Record voice messages for AI assistant",
         "NSCameraUsageDescription": "Take photos for AI image analysis",
-        "NSPhotoLibraryUsageDescription": "Select photos for AI analysis"
+        "NSPhotoLibraryUsageDescription": "Select photos for AI analysis",
+        "NSPhotoLibraryAddUsageDescription": "Save generated images to gallery"
       }
     },
     "android": {
@@ -28,7 +29,8 @@
       "permissions": [
         "RECORD_AUDIO",
         "CAMERA",
-        "READ_EXTERNAL_STORAGE"
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE"
       ]
     },
     "web": {
