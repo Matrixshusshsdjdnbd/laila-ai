@@ -141,24 +141,73 @@ export default function HistoryScreen() {
     }
   };
 
+  const showItemMenu = (item: Conversation) => {
+    Alert.alert(
+      item.title || 'Chat',
+      'Choose an action',
+      [
+        { text: (item as any).pinned ? 'Unpin' : 'Pin', onPress: () => togglePin(item) },
+        { text: 'Rename', onPress: () => promptRename(item) },
+        { text: 'Preview messages', onPress: () => loadMessages(item.id) },
+        { text: 'Delete', style: 'destructive', onPress: () => confirmDelete(item.id) },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+    );
+  };
+
+  const togglePin = async (item: Conversation) => {
+    await fetch(`${BACKEND_URL}/api/conversations/${item.id}?device_id=${DEVICE_ID}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pinned: !(item as any).pinned })
+    }).catch(() => {});
+    loadConversations();
+  };
+
+  const promptRename = (item: Conversation) => {
+    if (Platform.OS === 'ios') {
+      Alert.prompt('Rename chat', 'New title:', async (text?: string) => {
+        if (!text || !text.trim()) return;
+        await fetch(`${BACKEND_URL}/api/conversations/${item.id}?device_id=${DEVICE_ID}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: text.trim() })
+        }).catch(() => {});
+        loadConversations();
+      }, 'plain-text', item.title);
+    } else {
+      Alert.alert('Rename', 'Tap and hold the chat in a future update for in-line rename. For now please use iOS or web.');
+    }
+  };
+
+  const confirmDelete = (cid: string) => {
+    Alert.alert('Delete chat?', 'This cannot be undone.', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => deleteConversation(cid) },
+    ]);
+  };
+
   const renderConversation = ({ item }: { item: Conversation }) => {
     const modeInfo = MODE_ICONS[item.mode] || MODE_ICONS.chat;
     const isExpanded = expandedId === item.id;
+    const pinned = (item as any).pinned;
 
     return (
       <View>
         <TouchableOpacity
           testID={`history-item-${item.id}`}
-          style={[styles.convCard, isExpanded && styles.convCardExpanded]}
+          style={[styles.convCard, isExpanded && styles.convCardExpanded, pinned && styles.pinnedCard]}
           onPress={() => openConversation(item.id)}
-          onLongPress={() => loadMessages(item.id)}
+          onLongPress={() => showItemMenu(item)}
+          delayLongPress={350}
           activeOpacity={0.7}
         >
           <View style={[styles.convIcon, { backgroundColor: modeInfo.color + '20' }]}>
             <Ionicons name={modeInfo.icon as any} size={20} color={modeInfo.color} />
           </View>
           <View style={styles.convInfo}>
-            <Text style={styles.convTitle} numberOfLines={1}>{item.title}</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+              {pinned ? <Ionicons name="pin" size={12} color={COLORS.primary} /> : null}
+              <Text style={styles.convTitle} numberOfLines={1}>{item.title}</Text>
+            </View>
             <Text style={styles.convPreview} numberOfLines={1}>{item.last_message}</Text>
           </View>
           <View style={styles.convRight}>
@@ -209,6 +258,9 @@ export default function HistoryScreen() {
           <Text style={styles.headerTitle}>Recent chats</Text>
           <Text style={styles.headerSub}>{conversations.length} conversations — tap to open, long-press to preview</Text>
         </View>
+        <TouchableOpacity testID="projects-btn" onPress={() => router.push('/projects')} style={styles.folderBtn} activeOpacity={0.8}>
+          <Ionicons name="folder-outline" size={18} color={COLORS.primary} />
+        </TouchableOpacity>
         <TouchableOpacity testID="new-chat-btn" onPress={startNewChat} style={styles.newChatBtn} activeOpacity={0.8}>
           <Ionicons name="add" size={18} color={COLORS.primaryDark} />
           <Text style={styles.newChatBtnText}>New</Text>
@@ -276,6 +328,15 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.primaryDark,
   },
+  folderBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.primary,
+  },
   loadingContainer: {
     flex: 1,
     alignItems: 'center',
@@ -304,6 +365,10 @@ const styles = StyleSheet.create({
     borderBottomLeftRadius: 0,
     borderBottomRightRadius: 0,
     marginBottom: 0,
+  },
+  pinnedCard: {
+    borderColor: COLORS.primary + '60',
+    backgroundColor: COLORS.card,
   },
   convIcon: {
     width: 40,

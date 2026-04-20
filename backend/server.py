@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, Request, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Form, Request, Depends, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -450,6 +450,127 @@ async def save_message(conversation_id: str, role: str, content: str):
     msg = {"id": str(uuid.uuid4()), "conversation_id": conversation_id, "role": role, "content": content, "created_at": datetime.now(timezone.utc).isoformat()}
     await db.messages.insert_one(msg)
     return {k: v for k, v in msg.items() if k != "_id"}
+
+# ─── Projects (Workspace/Folders) ─────────────────────────
+
+class ProjectCreateRequest(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    color: Optional[str] = "#FFC107"
+
+class ProjectUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    color: Optional[str] = None
+
+class ConversationUpdateRequest(BaseModel):
+    title: Optional[str] = None
+    pinned: Optional[bool] = None
+    project_id: Optional[str] = None  # pass empty string to unassign
+
+@api_router.get("/projects")
+async def list_projects(request: Request, device_id: Optional[str] = None):
+    user = await get_current_user(request)
+    user_id = user["user_id"] if user else (device_id or "anonymous")
+    projects = await db.projects.find({"user_id": user_id}, {"_id": 0}).sort("updated_at", -1).to_list(100)
+    # Attach chat count for each project
+    for p in projects:
+        p["chat_count"] = await db.conversations.count_documents({"project_id": p["id"]})
+    return {"projects": projects}
+
+@api_router.post("/projects")
+async def create_project(req: ProjectCreateRequest, request: Request, device_id: Optional[str] = None):
+    user = await get_current_user(request)
+    user_id = user["user_id"] if user else (device_id or "anonymous")
+    if not req.name or not req.name.strip():
+        raise HTTPException(status_code=400, detail="Project name required")
+    now = datetime.now(timezone.utc).isoformat()
+    project = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "name": req.name.strip()[:80],
+        "description": (req.description or "").strip()[:500],
+        "color": req.color or "#FFC107",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.projects.insert_one(project)
+    result = {k: v for k, v in project.items() if k != "_id"}
+    result["chat_count"] = 0
+    return result
+
+@api_router.patch("/projects/{project_id}")
+async def update_project(project_id: str, req: ProjectUpdateRequest, request: Request, device_id: Optional[str] = None):
+    user = await get_current_user(request)
+    user_id = user["user_id"] if user else (device_id or "anonymous")
+    update = {"updated_at": datetime.now(timezone.utc).isoformat()}
+    if req.name is not None: update["name"] = req.name.strip()[:80]
+    if req.description is not None: update["description"] = req.description.strip()[:500]
+    if req.color is not None: update["color"] = req.color
+    result = await db.projects.update_one({"id": project_id, "user_id": user_id}, {"$set": update})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
+    p = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    return p
+
+@api_router.delete("/projects/{project_id}")
+async def delete_project(project_id: str, request: Request, device_id: Optional[str] = None):
+    user = await get_current_user(request)
+    user_id = user["user_id"] if user else (device_id or "anonymous")
+    # Unassign conversations (don't delete chats — user keeps them)
+    await db.conversations.update_many({"project_id": project_id, "user_id": user_id}, {"$unset": {"project_id": ""}})
+    result = await db.projects.delete_one({"id": project_id, "user_id": user_id})
+    return {"ok": result.deleted_count > 0}
+
+@api_router.get("/projects/{project_id}/conversations")
+async def list_project_conversations(project_id: str, request: Request, device_id: Optional[str] = None):
+    user = await get_current_user(request)
+    user_id = user["user_id"] if user else (device_id or "anonymous")
+    convs = await db.conversations.find({"project_id": project_id, "user_id": user_id}, {"_id": 0}).sort([("pinned", -1), ("updated_at", -1)]).to_list(200)
+    return {"conversations": convs}
+
+@api_router.patch("/conversations/{conversation_id}")
+async def update_conversation(conversation_id: str, req: ConversationUpdateRequest, request: Request, device_id: Optional[str] = None):
+    user = await get_current_user(request)
+    user_id = user["user_id"] if user else (device_id or "anonymous")
+    update = {"updated_at": datetime.now(timezone.utc).isoformat()}
+    unset = {}
+    if req.title is not None: update["title"] = req.title.strip()[:120] or "Untitled"
+    if req.pinned is not None: update["pinned"] = bool(req.pinned)
+    if req.project_id is not None:
+        if req.project_id == "":
+            unset["project_id"] = ""
+        else:
+            # Verify project belongs to user
+            proj = await db.projects.find_one({"id": req.project_id, "user_id": user_id}, {"_id": 0})
+            if not proj:
+                raise HTTPException(status_code=404, detail="Project not found")
+            update["project_id"] = req.project_id
+    ops = {"$set": update}
+    if unset:
+        ops["$unset"] = unset
+    result = await db.conversations.update_one({"id": conversation_id, "user_id": user_id}, ops)
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = await db.conversations.find_one({"id": conversation_id}, {"_id": 0})
+    return conv
+
+# ─── File Export (Text) ───────────────────────────────────
+
+class TextExportRequest(BaseModel):
+    content: str
+    filename: Optional[str] = "laila-document"
+
+@api_router.post("/export/txt")
+async def export_txt(req: TextExportRequest):
+    """Returns the given content as a downloadable .txt file."""
+    safe_name = "".join(c for c in (req.filename or "document") if c.isalnum() or c in "-_").strip() or "document"
+    body = (req.content or "").encode("utf-8")
+    return Response(
+        content=body,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}.txt"'},
+    )
 
 # ─── Auth Routes ──────────────────────────────────────────
 

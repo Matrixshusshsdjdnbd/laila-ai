@@ -140,6 +140,8 @@ export default function RootLayout() {
         <Tabs.Screen name="settings" options={{ title: 'Settings', tabBarIcon: SettingsIcon, tabBarTestID: 'bottom-nav-settings' }} />
         <Tabs.Screen name="premium" options={{ href: null }} />
         <Tabs.Screen name="call" options={{ href: null }} />
+        <Tabs.Screen name="projects" options={{ href: null }} />
+        <Tabs.Screen name="project/[id]" options={{ href: null }} />
       </Tabs>
     </>
   );
