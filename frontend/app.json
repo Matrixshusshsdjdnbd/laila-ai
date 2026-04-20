@@ -2,7 +2,7 @@
   "expo": {
     "name": "LAILA AI",
     "slug": "laila-ai",
-    "version": "3.1.0",
+    "version": "3.2.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "laila-ai",
@@ -11,6 +11,7 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.lailaai.app",
+      "buildNumber": "5",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Record voice messages for AI assistant",
         "NSCameraUsageDescription": "Take photos for AI image analysis",
@@ -20,7 +21,7 @@
     },
     "android": {
       "package": "com.lailaai.app",
-      "versionCode": 4,
+      "versionCode": 5,
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
         "backgroundColor": "#0A0908"
