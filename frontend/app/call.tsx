@@ -15,7 +15,7 @@ const COLORS = {
   recording: '#EF4444', success: '#22C55E', secondaryFg: '#FDE68A',
 };
 
-type CallState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'error';
+type CallState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'error' | 'paused';
 
 export default function CallScreen() {
   const [state, setState] = useState<CallState>('idle');
@@ -25,6 +25,7 @@ export default function CallScreen() {
   const [turnCount, setTurnCount] = useState(0);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [authToken, setAuthToken] = useState<string | null>(null);
+  const [paused, setPaused] = useState(false);
 
   const router = useRouter();
   const recordingRef = useRef<Audio.Recording | null>(null);
@@ -35,11 +36,15 @@ export default function CallScreen() {
   useEffect(() => {
     AsyncStorage.getItem('laila_auth_token').then(t => setAuthToken(t));
     durationTimer.current = setInterval(() => setDuration(d => d + 1), 1000);
+    // Auto-start listening on mount — no initial tap needed (premium ChatGPT feel)
+    const t = setTimeout(() => { if (isActive.current) startListening(); }, 500);
     return () => {
       isActive.current = false;
       cleanup();
+      clearTimeout(t);
       if (durationTimer.current) clearInterval(durationTimer.current);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const cleanup = async () => {
@@ -151,15 +156,16 @@ export default function CallScreen() {
         if (status.isLoaded && status.didJustFinish) {
           soundRef.current = null;
           sound.unloadAsync();
-          // Auto-continue: start listening again
-          if (isActive.current) startListening();
+          // Auto-continue: start listening again unless paused
+          if (isActive.current && !paused) startListening();
+          else if (paused) setState('paused');
         }
       });
     } catch (e) {
       setState('error');
       setResponse('Something went wrong. Tap to try again.');
     }
-  }, [conversationId, authToken, startListening]);
+  }, [conversationId, authToken, startListening, paused]);
 
   const endCall = async () => {
     isActive.current = false;
@@ -167,25 +173,61 @@ export default function CallScreen() {
     router.back();
   };
 
+  // Barge-in: tap avatar during LAILA speaking → interrupt and listen
+  const bargeIn = async () => {
+    if (state === 'speaking' && soundRef.current) {
+      try {
+        await soundRef.current.stopAsync();
+        await soundRef.current.unloadAsync();
+        soundRef.current = null;
+      } catch {}
+      if (isActive.current) startListening();
+    }
+  };
+
+  const togglePause = () => {
+    setPaused(p => {
+      const next = !p;
+      if (next) {
+        // Pause: stop any active mic recording
+        if (recordingRef.current) {
+          recordingRef.current.stopAndUnloadAsync().catch(() => {});
+          recordingRef.current = null;
+        }
+        setState('paused');
+      } else {
+        // Resume: start listening
+        setState('idle');
+        if (isActive.current) setTimeout(() => startListening(), 200);
+      }
+      return next;
+    });
+  };
+
   const handleTap = () => {
+    if (state === 'speaking') { bargeIn(); return; }
     if (state === 'listening') stopListening();
-    else if (state === 'idle' || state === 'error') startListening();
+    else if (state === 'idle' || state === 'error' || state === 'paused') {
+      if (paused) setPaused(false);
+      startListening();
+    }
   };
 
   const stateLabel: Record<CallState, string> = {
-    idle: 'Tap to start talking',
-    listening: 'Listening... Tap when done',
+    idle: 'Getting ready...',
+    listening: 'Listening — speak naturally',
     thinking: 'LAILA is thinking...',
-    speaking: 'LAILA is speaking...',
+    speaking: 'LAILA is speaking (tap to interrupt)',
     error: 'Tap to try again',
+    paused: 'Paused — tap to resume',
   };
 
   const stateIcon: Record<CallState, string> = {
-    idle: 'mic', listening: 'radio', thinking: 'hourglass', speaking: 'volume-high', error: 'refresh',
+    idle: 'mic', listening: 'radio', thinking: 'hourglass', speaking: 'volume-high', error: 'refresh', paused: 'play',
   };
 
   const stateColor: Record<CallState, string> = {
-    idle: COLORS.primary, listening: COLORS.recording, thinking: COLORS.secondaryFg, speaking: COLORS.success, error: COLORS.recording,
+    idle: COLORS.primary, listening: COLORS.recording, thinking: COLORS.secondaryFg, speaking: COLORS.success, error: COLORS.recording, paused: COLORS.mutedFg,
   };
 
   return (
@@ -200,12 +242,16 @@ export default function CallScreen() {
 
       {/* Main area */}
       <View style={s.main}>
-        {/* Avatar */}
-        <View style={[s.avatarRing, { borderColor: stateColor[state] + '40' }]}>
-          <View style={[s.avatar, state === 'listening' && s.avatarPulse, state === 'speaking' && s.avatarSpeaking]}>
+        {/* Avatar — tappable for barge-in (interrupt while LAILA speaking) */}
+        <TouchableOpacity
+          activeOpacity={state === 'speaking' ? 0.7 : 1}
+          onPress={state === 'speaking' ? bargeIn : undefined}
+          style={[s.avatarRing, { borderColor: stateColor[state] + '40' }]}
+        >
+          <View style={[s.avatar, state === 'listening' && s.avatarPulse, state === 'speaking' && s.avatarSpeaking, state === 'paused' && s.avatarPaused]}>
             <Text style={s.avatarText}>L</Text>
           </View>
-        </View>
+        </TouchableOpacity>
 
         {/* State label */}
         <View style={[s.stateBadge, { backgroundColor: stateColor[state] + '15' }]}>
@@ -235,26 +281,40 @@ export default function CallScreen() {
         )}
       </View>
 
-      {/* Controls */}
+      {/* Controls — 3 buttons: Pause / End Call / Mic */}
       <View style={s.controls}>
-        {/* Main action button */}
-        <TouchableOpacity
-          testID="call-action-btn"
-          style={[s.actionBtn, { backgroundColor: stateColor[state] + '20', borderColor: stateColor[state] }]}
-          onPress={handleTap}
-          disabled={state === 'thinking' || state === 'speaking'}
-          activeOpacity={0.7}
-        >
-          {state === 'thinking' ? (
-            <ActivityIndicator size={32} color={stateColor[state]} />
-          ) : (
-            <Ionicons name={stateIcon[state] as any} size={32} color={stateColor[state]} />
-          )}
+        {/* Pause/Resume */}
+        <TouchableOpacity testID="pause-btn" style={s.sideBtn} onPress={togglePause} activeOpacity={0.7}>
+          <View style={s.sideBtnInner}>
+            <Ionicons name={paused ? 'play' : 'pause'} size={22} color={COLORS.white} />
+          </View>
+          <Text style={s.sideBtnLabel}>{paused ? 'Resume' : 'Pause'}</Text>
         </TouchableOpacity>
 
-        {/* End call */}
-        <TouchableOpacity testID="end-call-btn" style={s.endBtn} onPress={endCall}>
-          <Ionicons name="close" size={28} color={COLORS.white} />
+        {/* End Call (big, red, labelled) */}
+        <TouchableOpacity testID="end-call-btn" style={s.centerEnd} onPress={endCall} activeOpacity={0.85}>
+          <View style={s.endBtn}>
+            <Ionicons name="call" size={30} color={COLORS.white} style={{ transform: [{ rotate: '135deg' }] }} />
+          </View>
+          <Text style={s.endLabel}>End call</Text>
+        </TouchableOpacity>
+
+        {/* Mic action — only active when paused/idle/error */}
+        <TouchableOpacity
+          testID="call-action-btn"
+          style={s.sideBtn}
+          onPress={handleTap}
+          disabled={state === 'thinking'}
+          activeOpacity={0.7}
+        >
+          <View style={[s.sideBtnInner, { backgroundColor: stateColor[state] + '30', borderColor: stateColor[state] }]}>
+            {state === 'thinking' ? (
+              <ActivityIndicator size={22} color={stateColor[state]} />
+            ) : (
+              <Ionicons name={stateIcon[state] as any} size={22} color={stateColor[state]} />
+            )}
+          </View>
+          <Text style={s.sideBtnLabel}>{state === 'listening' ? 'Stop' : state === 'speaking' ? 'Interrupt' : 'Speak'}</Text>
         </TouchableOpacity>
       </View>
     </SafeAreaView>
@@ -272,6 +332,7 @@ const s = StyleSheet.create({
   avatar: { width: 120, height: 120, borderRadius: 60, backgroundColor: COLORS.primary, alignItems: 'center', justifyContent: 'center' },
   avatarPulse: { backgroundColor: COLORS.recording },
   avatarSpeaking: { backgroundColor: COLORS.success },
+  avatarPaused: { backgroundColor: COLORS.mutedFg },
   avatarText: { fontSize: 48, fontWeight: '800', color: COLORS.primaryDark },
   stateBadge: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, marginBottom: 24 },
   stateText: { fontSize: 14, fontWeight: '600' },
@@ -281,7 +342,11 @@ const s = StyleSheet.create({
   responseLabel: { fontSize: 11, color: COLORS.primary, fontWeight: '700', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.5 },
   textContent: { fontSize: 15, color: COLORS.text, lineHeight: 22 },
   turnCount: { fontSize: 12, color: COLORS.mutedFg, marginTop: 8 },
-  controls: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 32, paddingBottom: Platform.OS === 'ios' ? 48 : 32, paddingTop: 16 },
-  actionBtn: { width: 80, height: 80, borderRadius: 40, alignItems: 'center', justifyContent: 'center', borderWidth: 2 },
-  endBtn: { width: 56, height: 56, borderRadius: 28, backgroundColor: COLORS.recording, alignItems: 'center', justifyContent: 'center' },
+  controls: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-around', paddingBottom: Platform.OS === 'ios' ? 48 : 32, paddingTop: 16, paddingHorizontal: 20 },
+  sideBtn: { alignItems: 'center', gap: 6 },
+  sideBtnInner: { width: 58, height: 58, borderRadius: 29, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.muted },
+  sideBtnLabel: { fontSize: 11, color: COLORS.mutedFg, fontWeight: '600' },
+  centerEnd: { alignItems: 'center', gap: 6 },
+  endBtn: { width: 72, height: 72, borderRadius: 36, backgroundColor: COLORS.recording, alignItems: 'center', justifyContent: 'center' },
+  endLabel: { fontSize: 12, color: COLORS.white, fontWeight: '700' },
 });

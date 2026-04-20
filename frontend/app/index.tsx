@@ -12,6 +12,7 @@ import * as Sharing from 'expo-sharing';
 import * as MediaLibrary from 'expo-media-library';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter, useLocalSearchParams } from 'expo-router';
+import * as Clipboard from 'expo-clipboard';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
@@ -550,6 +551,13 @@ export default function ChatScreen() {
     }
   };
 
+  const copyMessage = async (text: string) => {
+    try {
+      await Clipboard.setStringAsync(text);
+      Alert.alert('Copied', 'Message copied to clipboard');
+    } catch {}
+  };
+
   const renderMessage = ({ item }: { item: Message }) => {
     const isUser = item.role === 'user';
     const isPlaying = playingId === item.id;
@@ -565,21 +573,26 @@ export default function ChatScreen() {
           </View>
         )}
         <View style={{ maxWidth: '100%' }}>
-          <View style={[styles.bubble, isUser ? styles.userBubble : styles.aiBubble]}>
-            {!isUser && <Text style={styles.aiLabel}>LAILA</Text>}
-            {/* User-sent photo preview */}
-            {hasUserImage && (
-              <Image source={{ uri: hasUserImage }} style={styles.userImage} resizeMode="cover" />
-            )}
-            {!isUser && !item.content && loading ? (
-              <View style={styles.typingRow}>
-                <View style={styles.typingDot} />
-                <View style={[styles.typingDot, { opacity: 0.7 }]} />
-                <View style={[styles.typingDot, { opacity: 0.4 }]} />
-              </View>
-            ) : (
-              <Text style={[styles.msgText, isUser && styles.userMsgText]}>{item.content}</Text>
-            )}
+          <TouchableOpacity
+            activeOpacity={0.95}
+            onLongPress={() => item.content && copyMessage(item.content)}
+            delayLongPress={350}
+          >
+            <View style={[styles.bubble, isUser ? styles.userBubble : styles.aiBubble]}>
+              {!isUser && <Text style={styles.aiLabel}>LAILA</Text>}
+              {/* User-sent photo preview */}
+              {hasUserImage && (
+                <Image source={{ uri: hasUserImage }} style={styles.userImage} resizeMode="cover" />
+              )}
+              {!isUser && !item.content && loading ? (
+                <View style={styles.typingRow}>
+                  <View style={styles.typingDot} />
+                  <View style={[styles.typingDot, { opacity: 0.7 }]} />
+                  <View style={[styles.typingDot, { opacity: 0.4 }]} />
+                </View>
+              ) : (
+                <Text selectable style={[styles.msgText, isUser && styles.userMsgText]}>{item.content}</Text>
+              )}
             {/* Generated Image */}
             {hasGenImage && (
               <>
@@ -597,6 +610,7 @@ export default function ChatScreen() {
               </>
             )}
           </View>
+          </TouchableOpacity>
           {/* TTS Speaker Button */}
           {!isUser && !hasGenImage && (
             <TouchableOpacity
