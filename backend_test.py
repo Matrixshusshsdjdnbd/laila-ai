@@ -1,270 +1,283 @@
 """
-LAILA AI Backend Regression + New Feature Test
-Scoped to the review request items only.
+Focused re-test for previously failing flows:
+- Projects ↔ Conversations linking
+- Pin / Rename conversations
+- SSE stream with device_id in body
+
+Base URL: https://africa-laila-hub.preview.emergentagent.com
+All tests use device_id = "fix-verify-1".
 """
+
 import json
 import sys
-import base64
+import time
+
 import requests
 
 BASE = "https://africa-laila-hub.preview.emergentagent.com/api"
-DEVICE = "final-regress-1"
-TIMEOUT = 90
+DEVICE_ID = "fix-verify-1"
 
 results = []
 
-def log(name, ok, detail=""):
-    mark = "PASS" if ok else "FAIL"
-    print(f"[{mark}] {name}  {detail}")
-    results.append((ok, name, detail))
-    return ok
 
-
-project_id = None
-
-def test_projects_crud():
-    global project_id
-    # a) Create
-    r = requests.post(f"{BASE}/projects", params={"device_id": DEVICE},
-                      json={"name": "CV Project", "description": "My resume work", "color": "#3B82F6"},
-                      timeout=TIMEOUT)
-    ok = r.status_code == 200
-    data = r.json() if ok else {}
-    project_id = data.get("id")
-    cond = ok and project_id and data.get("name") == "CV Project" and data.get("color") == "#3B82F6" and data.get("chat_count") == 0
-    log("1a POST /api/projects creates project", cond,
-        f"status={r.status_code} body={r.text[:200]}")
-
-    # b) List
-    r = requests.get(f"{BASE}/projects", params={"device_id": DEVICE}, timeout=TIMEOUT)
-    ok = r.status_code == 200
-    data = r.json() if ok else {}
-    projs = data.get("projects", [])
-    cond = ok and isinstance(projs, list) and any(p.get("id") == project_id for p in projs)
-    log("1b GET /api/projects lists created project", cond,
-        f"status={r.status_code} count={len(projs) if ok else 'n/a'}")
-
-    # c) Patch
-    r = requests.patch(f"{BASE}/projects/{project_id}", params={"device_id": DEVICE},
-                       json={"name": "CV Final", "color": "#10B981"}, timeout=TIMEOUT)
-    ok = r.status_code == 200
-    data = r.json() if ok else {}
-    cond = ok and data.get("name") == "CV Final" and data.get("color") == "#10B981"
-    log("1c PATCH /api/projects/{id} updates", cond,
-        f"status={r.status_code} body={r.text[:200]}")
-
-    # d) Delete
-    r = requests.delete(f"{BASE}/projects/{project_id}", params={"device_id": DEVICE}, timeout=TIMEOUT)
-    ok = r.status_code == 200
-    data = r.json() if ok else {}
-    cond = ok and data.get("ok") is True
-    log("1d DELETE /api/projects/{id} ok:true", cond,
-        f"status={r.status_code} body={r.text[:200]}")
-
-    # e) 404
-    r = requests.patch(f"{BASE}/projects/non-existent-id", params={"device_id": DEVICE},
-                       json={"name": "x"}, timeout=TIMEOUT)
-    cond = r.status_code == 404
-    log("1e PATCH non-existent project → 404", cond, f"status={r.status_code}")
-
-
-def test_project_conv_relationship():
-    # fresh project
-    r = requests.post(f"{BASE}/projects", params={"device_id": DEVICE},
-                      json={"name": "Work Folder", "description": "", "color": "#F59E0B"},
-                      timeout=TIMEOUT)
-    if r.status_code != 200:
-        log("2a Create project", False, f"status={r.status_code}")
-        return
-    pid = r.json()["id"]
-    log("2a Create project for conv link", True, f"pid={pid}")
-
-    # chat → conv id
-    r = requests.post(f"{BASE}/chat",
-                      json={"message": "Hi", "mode": "chat", "conversation_id": None,
-                            "device_id": DEVICE},
-                      timeout=TIMEOUT)
-    ok = r.status_code == 200
-    data = r.json() if ok else {}
-    conv_id = data.get("conversation_id")
-    log("2b POST /api/chat returns conversation_id", ok and bool(conv_id),
-        f"status={r.status_code} conv_id={conv_id}")
-    if not conv_id:
-        return
-
-    # Link
-    r = requests.patch(f"{BASE}/conversations/{conv_id}", params={"device_id": DEVICE},
-                       json={"project_id": pid}, timeout=TIMEOUT)
-    link_ok = r.status_code == 200
-    log("2c PATCH /api/conversations/{id} link to project", link_ok,
-        f"status={r.status_code} body={r.text[:220]}")
-
-    # List
-    r = requests.get(f"{BASE}/projects/{pid}/conversations",
-                     params={"device_id": DEVICE}, timeout=TIMEOUT)
-    ok = r.status_code == 200
-    convs = r.json().get("conversations", []) if ok else []
-    cond = ok and any(c.get("id") == conv_id for c in convs)
-    log("2d GET /api/projects/{pid}/conversations includes conv", cond,
-        f"status={r.status_code} count={len(convs) if ok else 'n/a'}")
-
-    # Unassign
-    r = requests.patch(f"{BASE}/conversations/{conv_id}", params={"device_id": DEVICE},
-                       json={"project_id": ""}, timeout=TIMEOUT)
-    cond = r.status_code == 200
-    log("2e PATCH project_id='' unassigns", cond,
-        f"status={r.status_code} body={r.text[:200]}")
-
-    # Empty
-    r = requests.get(f"{BASE}/projects/{pid}/conversations",
-                     params={"device_id": DEVICE}, timeout=TIMEOUT)
-    ok = r.status_code == 200
-    convs = r.json().get("conversations", []) if ok else []
-    cond = ok and not any(c.get("id") == conv_id for c in convs)
-    log("2f GET /api/projects/{pid}/conversations empty after unassign", cond,
-        f"status={r.status_code} remaining={len(convs) if ok else 'n/a'}")
-
-    requests.delete(f"{BASE}/projects/{pid}", params={"device_id": DEVICE}, timeout=TIMEOUT)
-
-
-def test_pin_rename():
-    r = requests.post(f"{BASE}/chat",
-                      json={"message": "Hi for pin test", "mode": "chat",
-                            "conversation_id": None, "device_id": DEVICE},
-                      timeout=TIMEOUT)
-    if r.status_code != 200:
-        log("3 pre-req chat", False, f"status={r.status_code}")
-        return
-    conv_id = r.json()["conversation_id"]
-
-    r = requests.patch(f"{BASE}/conversations/{conv_id}", params={"device_id": DEVICE},
-                       json={"pinned": True, "title": "Pinned Important Chat"},
-                       timeout=TIMEOUT)
-    ok = r.status_code == 200
-    data = r.json() if ok else {}
-    cond = ok and data.get("pinned") is True and data.get("title") == "Pinned Important Chat"
-    log("3a PATCH pinned=true title=Pinned Important Chat", cond,
-        f"status={r.status_code} body={r.text[:220]}")
-
-    r = requests.get(f"{BASE}/conversations", params={"device_id": DEVICE}, timeout=TIMEOUT)
-    ok = r.status_code == 200
-    convs = r.json().get("conversations", []) if ok else []
-    match = next((c for c in convs if c.get("id") == conv_id), None)
-    cond = ok and match and match.get("pinned") is True and match.get("title") == "Pinned Important Chat"
-    log("3b GET /api/conversations shows pinned:true + new title", cond,
-        f"status={r.status_code} match_found={bool(match)} "
-        f"title={(match or {}).get('title')!r} pinned={(match or {}).get('pinned')}")
-
-    r = requests.patch(f"{BASE}/conversations/{conv_id}", params={"device_id": DEVICE},
-                       json={"pinned": False}, timeout=TIMEOUT)
-    ok = r.status_code == 200
-    data = r.json() if ok else {}
-    cond = ok and data.get("pinned") is False
-    log("3c PATCH pinned=false returns pinned:false", cond,
-        f"status={r.status_code} body={r.text[:200]}")
-
-
-def test_export_txt():
-    content = "Hello, this is my CV content\nLine 2"
-    r = requests.post(f"{BASE}/export/txt",
-                      json={"content": content, "filename": "my-cv"}, timeout=TIMEOUT)
-    ok = r.status_code == 200
-    ctype = r.headers.get("content-type", "")
-    cdisp = r.headers.get("content-disposition", "")
-    body = r.text
-    cond = (ok and "text/plain" in ctype and "attachment" in cdisp
-            and 'my-cv.txt' in cdisp and body == content)
-    log("4 POST /api/export/txt returns correct file", cond,
-        f"status={r.status_code} ctype={ctype!r} cdisp={cdisp!r} "
-        f"body_match={body == content} body_len={len(body)}")
-
-
-def test_regressions():
-    # SSE
-    try:
-        with requests.post(f"{BASE}/chat/stream",
-                           json={"message": "Say hi in one short sentence.", "mode": "chat",
-                                 "conversation_id": None},
-                           stream=True, timeout=TIMEOUT) as r:
-            ctype = r.headers.get("content-type", "")
-            got_delta = False
-            got_done = False
-            got_conv = False
-            for line in r.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data: "):
-                    continue
-                try:
-                    evt = json.loads(line[6:])
-                except Exception:
-                    continue
-                if "conversation_id" in evt and not got_done:
-                    got_conv = True
-                if "delta" in evt:
-                    got_delta = True
-                if evt.get("done"):
-                    got_done = True
-                    break
-            cond = r.status_code == 200 and "text/event-stream" in ctype and got_conv and got_delta and got_done
-            log("5a POST /api/chat/stream SSE works", cond,
-                f"status={r.status_code} ctype={ctype!r} conv={got_conv} delta={got_delta} done={got_done}")
-    except Exception as e:
-        log("5a POST /api/chat/stream SSE works", False, f"exc={e}")
-
-    # TTS
-    r = requests.post(f"{BASE}/tts",
-                      json={"text": "Bonjour, ceci est un test de voix.",
-                            "voice": "onyx", "speed": 1.1}, timeout=TIMEOUT)
-    ok = r.status_code == 200
-    data = r.json() if ok else {}
-    audio = data.get("audio", "")
-    raw = b""
-    try:
-        raw = base64.b64decode(audio) if audio else b""
-        b64_ok = len(raw) > 100
-    except Exception:
-        b64_ok = False
-    cond = ok and b64_ok and data.get("format") == "mp3"
-    log("5b POST /api/tts onyx speed=1.1 returns base64 mp3", cond,
-        f"status={r.status_code} audio_chars={len(audio)} decoded_bytes={len(raw)}")
-
-    # Voices
-    r = requests.get(f"{BASE}/voices", timeout=TIMEOUT)
-    ok = r.status_code == 200
-    voices = r.json().get("voices", []) if ok else []
-    cond = ok and len(voices) == 6
-    log("5c GET /api/voices returns 6 voices", cond,
-        f"status={r.status_code} count={len(voices)}")
-
-    # Conversations
-    r = requests.get(f"{BASE}/conversations", params={"device_id": DEVICE}, timeout=TIMEOUT)
-    ok = r.status_code == 200
-    cond = ok and "conversations" in (r.json() if ok else {})
-    log("5d GET /api/conversations returns conversations array", cond,
-        f"status={r.status_code}")
+def record(name, passed, detail=""):
+    results.append((name, passed, detail))
+    status = "PASS" if passed else "FAIL"
+    print(f"[{status}] {name} — {detail}")
 
 
 def main():
-    print(f"Testing backend: {BASE}\n")
-    print("=== 1. Projects CRUD ===")
-    test_projects_crud()
-    print("\n=== 2. Project <-> Conversation ===")
-    test_project_conv_relationship()
-    print("\n=== 3. Pin + Rename ===")
-    test_pin_rename()
-    print("\n=== 4. Export TXT ===")
-    test_export_txt()
-    print("\n=== 5. Regressions ===")
-    test_regressions()
+    cid = None
+    pid = None
 
-    print("\n\n===== SUMMARY =====")
-    passed = sum(1 for ok, *_ in results if ok)
+    # --- Test 1: POST /api/chat with device_id ---
+    try:
+        r = requests.post(
+            f"{BASE}/chat",
+            json={
+                "message": "Hi LAILA",
+                "mode": "chat",
+                "conversation_id": None,
+                "device_id": DEVICE_ID,
+            },
+            timeout=60,
+        )
+        ok = r.status_code == 200
+        body = r.json() if ok else {}
+        cid = body.get("conversation_id")
+        record(
+            "1) POST /api/chat with device_id",
+            ok and bool(cid),
+            f"status={r.status_code}, cid={cid}",
+        )
+    except Exception as e:
+        record("1) POST /api/chat with device_id", False, f"exc={e}")
+
+    if not cid:
+        print("Cannot proceed without conversation_id. Aborting.")
+        finalize()
+        return
+
+    # --- Test 2: GET /api/conversations?device_id=fix-verify-1 contains cid ---
+    try:
+        r = requests.get(f"{BASE}/conversations", params={"device_id": DEVICE_ID}, timeout=30)
+        ok = r.status_code == 200
+        convs = r.json().get("conversations", []) if ok else []
+        found = any(c.get("id") == cid for c in convs)
+        record(
+            "2) GET /api/conversations lists the cid",
+            ok and found,
+            f"status={r.status_code}, count={len(convs)}, cid_found={found}",
+        )
+    except Exception as e:
+        record("2) GET /api/conversations lists the cid", False, f"exc={e}")
+
+    # --- Test 3: POST /api/projects ---
+    try:
+        r = requests.post(
+            f"{BASE}/projects",
+            params={"device_id": DEVICE_ID},
+            json={"name": "Verify", "color": "#10B981"},
+            timeout=30,
+        )
+        ok = r.status_code == 200
+        body = r.json() if ok else {}
+        pid = body.get("id")
+        record(
+            "3) POST /api/projects",
+            ok and bool(pid),
+            f"status={r.status_code}, pid={pid}, name={body.get('name')}, color={body.get('color')}",
+        )
+    except Exception as e:
+        record("3) POST /api/projects", False, f"exc={e}")
+
+    if not pid:
+        print("Cannot proceed without project_id. Aborting.")
+        finalize()
+        return
+
+    # --- Test 4: PATCH /api/conversations/{cid} set project_id=pid ---
+    try:
+        r = requests.patch(
+            f"{BASE}/conversations/{cid}",
+            params={"device_id": DEVICE_ID},
+            json={"project_id": pid},
+            timeout=30,
+        )
+        ok = r.status_code == 200
+        body = r.json() if ok else {}
+        conv = body.get("conversation", body)  # allow either wrapped or direct
+        project_id_val = conv.get("project_id") if isinstance(conv, dict) else None
+        record(
+            "4) PATCH conversation link-to-project returns 200 with project_id=pid",
+            ok and project_id_val == pid,
+            f"status={r.status_code}, returned_project_id={project_id_val}",
+        )
+    except Exception as e:
+        record("4) PATCH conversation link-to-project", False, f"exc={e}")
+
+    # --- Test 5: GET /api/projects/{pid}/conversations contains cid ---
+    try:
+        r = requests.get(
+            f"{BASE}/projects/{pid}/conversations",
+            params={"device_id": DEVICE_ID},
+            timeout=30,
+        )
+        ok = r.status_code == 200
+        body = r.json() if ok else {}
+        convs = body.get("conversations", body if isinstance(body, list) else [])
+        found = any(c.get("id") == cid for c in convs) if isinstance(convs, list) else False
+        record(
+            "5) GET /api/projects/{pid}/conversations lists cid",
+            ok and found,
+            f"status={r.status_code}, count={len(convs) if isinstance(convs, list) else 'n/a'}, cid_found={found}",
+        )
+    except Exception as e:
+        record("5) GET /api/projects/{pid}/conversations lists cid", False, f"exc={e}")
+
+    # --- Test 6: PATCH pinned=true, title="Important" ---
+    try:
+        r = requests.patch(
+            f"{BASE}/conversations/{cid}",
+            params={"device_id": DEVICE_ID},
+            json={"pinned": True, "title": "Important"},
+            timeout=30,
+        )
+        ok = r.status_code == 200
+        body = r.json() if ok else {}
+        conv = body.get("conversation", body)
+        pinned_val = conv.get("pinned") if isinstance(conv, dict) else None
+        title_val = conv.get("title") if isinstance(conv, dict) else None
+        record(
+            "6) PATCH pinned=true, title='Important'",
+            ok and pinned_val is True and title_val == "Important",
+            f"status={r.status_code}, pinned={pinned_val}, title={title_val!r}",
+        )
+    except Exception as e:
+        record("6) PATCH pinned+title", False, f"exc={e}")
+
+    # --- Test 7: GET /api/conversations shows cid first with title "Important" ---
+    try:
+        r = requests.get(f"{BASE}/conversations", params={"device_id": DEVICE_ID}, timeout=30)
+        ok = r.status_code == 200
+        convs = r.json().get("conversations", []) if ok else []
+        first = convs[0] if convs else {}
+        record(
+            "7) GET /api/conversations — pinned cid first with title 'Important'",
+            ok and first.get("id") == cid and first.get("title") == "Important",
+            f"status={r.status_code}, first_id={first.get('id')}, first_title={first.get('title')!r}, first_pinned={first.get('pinned')}",
+        )
+    except Exception as e:
+        record("7) GET /api/conversations pinned sort", False, f"exc={e}")
+
+    # --- Test 8: PATCH project_id="" to unassign ---
+    try:
+        r = requests.patch(
+            f"{BASE}/conversations/{cid}",
+            params={"device_id": DEVICE_ID},
+            json={"project_id": ""},
+            timeout=30,
+        )
+        ok = r.status_code == 200
+        body = r.json() if ok else {}
+        conv = body.get("conversation", body)
+        project_id_val = conv.get("project_id") if isinstance(conv, dict) else "SENTINEL"
+        # After unassign, project_id should be absent/None/empty
+        unassigned = project_id_val in (None, "", "SENTINEL") or project_id_val is None
+        record(
+            "8) PATCH project_id='' unassigns",
+            ok and unassigned,
+            f"status={r.status_code}, project_id_after={project_id_val!r}",
+        )
+    except Exception as e:
+        record("8) PATCH unassign project", False, f"exc={e}")
+
+    # --- Test 9: DELETE /api/projects/{pid} ---
+    try:
+        r = requests.delete(
+            f"{BASE}/projects/{pid}",
+            params={"device_id": DEVICE_ID},
+            timeout=30,
+        )
+        ok = r.status_code == 200
+        body = r.json() if ok else {}
+        record(
+            "9) DELETE /api/projects/{pid}",
+            ok,
+            f"status={r.status_code}, body={body}",
+        )
+    except Exception as e:
+        record("9) DELETE /api/projects/{pid}", False, f"exc={e}")
+
+    # --- Regression: POST /api/chat/stream with device_id in body ---
+    stream_cid = None
+    try:
+        with requests.post(
+            f"{BASE}/chat/stream",
+            json={
+                "message": "Stream test",
+                "mode": "chat",
+                "device_id": DEVICE_ID,
+            },
+            stream=True,
+            timeout=90,
+        ) as r:
+            ctype = r.headers.get("Content-Type", "")
+            ok_headers = r.status_code == 200 and "text/event-stream" in ctype
+            delta_count = 0
+            done_seen = False
+            buf = ""
+            for raw in r.iter_lines(decode_unicode=True):
+                if raw is None:
+                    continue
+                if raw.startswith("data: "):
+                    payload = raw[6:]
+                    try:
+                        obj = json.loads(payload)
+                    except Exception:
+                        continue
+                    if obj.get("conversation_id") and not stream_cid:
+                        stream_cid = obj["conversation_id"]
+                    if obj.get("delta"):
+                        delta_count += 1
+                    if obj.get("done"):
+                        done_seen = True
+                        break
+            record(
+                "R1) POST /api/chat/stream SSE with device_id body",
+                ok_headers and stream_cid and delta_count > 0 and done_seen,
+                f"status={r.status_code}, ctype={ctype}, stream_cid={stream_cid}, deltas={delta_count}, done={done_seen}",
+            )
+    except Exception as e:
+        record("R1) POST /api/chat/stream SSE with device_id body", False, f"exc={e}")
+
+    # --- Regression: final conversation appears in GET /api/conversations ---
+    if stream_cid:
+        try:
+            time.sleep(1)
+            r = requests.get(f"{BASE}/conversations", params={"device_id": DEVICE_ID}, timeout=30)
+            ok = r.status_code == 200
+            convs = r.json().get("conversations", []) if ok else []
+            found = any(c.get("id") == stream_cid for c in convs)
+            record(
+                "R2) Stream conv appears in GET /api/conversations",
+                ok and found,
+                f"status={r.status_code}, count={len(convs)}, stream_cid_found={found}",
+            )
+        except Exception as e:
+            record("R2) Stream conv appears in GET /api/conversations", False, f"exc={e}")
+
+    finalize()
+
+
+def finalize():
+    print("\n========== SUMMARY ==========")
+    passed = sum(1 for _, ok, _ in results if ok)
     total = len(results)
-    print(f"{passed}/{total} passed")
-    for ok, name, detail in results:
-        mark = "PASS" if ok else "FAIL"
-        print(f"  [{mark}] {name}")
-        if not ok:
-            print(f"         {detail}")
+    print(f"Passed: {passed}/{total}")
+    for name, ok, detail in results:
+        status = "PASS" if ok else "FAIL"
+        print(f"  [{status}] {name}")
     sys.exit(0 if passed == total else 1)
 
 

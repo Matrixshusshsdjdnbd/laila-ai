@@ -134,6 +134,7 @@ class ChatRequest(BaseModel):
     message: str
     conversation_id: Optional[str] = None
     mode: str = "chat"
+    device_id: Optional[str] = None
 
 class ImageChatRequest(BaseModel):
     message: str = "What is in this image?"
@@ -668,7 +669,7 @@ async def root():
 async def chat_endpoint(req: ChatRequest, request: Request):
     try:
         user = await get_current_user(request)
-        user_id = user["user_id"] if user else "anonymous"
+        user_id = user["user_id"] if user else (req.device_id or "anonymous")
         conv = await get_or_create_conversation(user_id, req.mode, req.conversation_id)
         conv_id = conv["id"]
         await save_message(conv_id, "user", req.message)
@@ -718,7 +719,7 @@ EMERGENT_PROXY_BASE = "https://integrations.emergentagent.com/llm"
 async def chat_stream(req: ChatRequest, request: Request):
     """Server-Sent-Events streaming chat. Emits {delta:"..."} chunks and finishes with {done:true, ...}."""
     user = await get_current_user(request)
-    user_id = user["user_id"] if user else "anonymous"
+    user_id = user["user_id"] if user else (req.device_id or "anonymous")
     conv = await get_or_create_conversation(user_id, req.mode, req.conversation_id)
     conv_id = conv["id"]
     await save_message(conv_id, "user", req.message)

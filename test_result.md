@@ -192,27 +192,33 @@ backend:
 
   - task: "Project-Conversation linking PATCH /api/conversations/{id} project_id + GET /api/projects/{pid}/conversations"
     implemented: true
-    working: false
+    working: true
     file: "backend/server.py"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
         -working: false
         -agent: "testing"
-        -comment: "CRITICAL BUG — anonymous/device flows are broken for PATCH /api/conversations/{id}. Root cause confirmed: POST /api/chat (and /api/chat/stream) does NOT accept a device_id (neither as query param nor as body field — ChatRequest model only has message/conversation_id/mode). When an anonymous user posts to /api/chat with device_id=final-regress-1 in the body, that device_id is SILENTLY IGNORED and the conversation is created under user_id='anonymous' (verified: GET /api/conversations?device_id=anonymous returns 42 conversations including the ones we just created). However, PATCH /api/conversations/{id}?device_id=final-regress-1 correctly scopes the query to {id: conv_id, user_id: 'final-regress-1'}, which finds nothing → HTTP 404 'Conversation not found'. Same story for GET /api/projects/{pid}/conversations — queries user_id=device_id, finds nothing. Results: 2c PATCH link-to-project → 404 FAIL, 2d GET project conversations includes conv → 200 but count=0 FAIL, 2e PATCH unassign → 404 FAIL. 2f 'empty after unassign' accidentally passes because the conv was never linked in the first place. FIX NEEDED: add optional device_id (query param) to /api/chat and /api/chat/stream, and when present (and no authed user), use it as user_id when creating conversations and storing messages — mirror the pattern already used by the Projects endpoints and by GET /api/conversations. Also /api/chat currently ignores device_id even if added to ChatRequest body, so the fix must either add the field to the Pydantic model OR read it as a query parameter."
+        -comment: "CRITICAL BUG — anonymous/device flows are broken for PATCH /api/conversations/{id}. Root cause confirmed: POST /api/chat (and /api/chat/stream) does NOT accept a device_id (neither as query param nor as body field — ChatRequest model only has message/conversation_id/mode). When an anonymous user posts to /api/chat with device_id=final-regress-1 in the body, that device_id is SILENTLY IGNORED and the conversation is created under user_id='anonymous'. PATCH /api/conversations/{id}?device_id=final-regress-1 correctly scopes by user_id=final-regress-1, finds nothing → HTTP 404. FIX NEEDED: add optional device_id to /api/chat and /api/chat/stream, use as user_id when no authed user."
+        -working: true
+        -agent: "testing"
+        -comment: "FIX VERIFIED — main agent added device_id: Optional[str] to ChatRequest Pydantic model; POST /api/chat and POST /api/chat/stream now use req.device_id as user_id when no authed user (server.py lines 137, 672, 722). Re-ran focused tests with device_id='fix-verify-1': (1) POST /api/chat with device_id → 200, cid returned; (2) GET /api/conversations?device_id=fix-verify-1 lists the cid; (3) POST /api/projects → 200, pid returned (name='Verify', color='#10B981'); (4) PATCH /api/conversations/{cid}?device_id=fix-verify-1 with {project_id: pid} → 200, returned conversation.project_id == pid (previously 404); (5) GET /api/projects/{pid}/conversations?device_id=fix-verify-1 → 200, list contains cid (previously empty); (8) PATCH {project_id: ''} unassign → 200, project_id_after=None; (9) DELETE /api/projects/{pid} → 200 {ok:true}. All previously failing sub-tests now pass."
 
   - task: "Pin + Rename conversations PATCH /api/conversations/{id}"
     implemented: true
-    working: false
+    working: true
     file: "backend/server.py"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
-    needs_retesting: true
+    needs_retesting: false
     status_history:
         -working: false
         -agent: "testing"
-        -comment: "Same root cause as the project-conversation task: /api/chat ignores device_id when creating conversations (stores under user_id='anonymous'), but PATCH /api/conversations/{id}?device_id=final-regress-1 scopes by user_id=final-regress-1 → HTTP 404 for every PATCH. Sub-tests: 3a PATCH {pinned:true, title:'Pinned Important Chat'} → 404 FAIL, 3b GET /api/conversations?device_id=final-regress-1 did not list the conv (because the conv is under user_id='anonymous', not 'final-regress-1') FAIL, 3c PATCH {pinned:false} → 404 FAIL. The PATCH handler's logic (update title.strip()[:120] or 'Untitled', bool(pinned), $set/$unset project_id) looks correct in isolation — it just never finds the target because the owner id mismatch. FIX: same as above — propagate device_id into /api/chat and /api/chat/stream so anonymous device-scoped conversations are stored under the device_id as user_id."
+        -comment: "Same root cause as the project-conversation task: /api/chat ignores device_id when creating conversations (stores under user_id='anonymous'), but PATCH /api/conversations/{id}?device_id=final-regress-1 scopes by user_id=final-regress-1 → HTTP 404 for every PATCH."
+        -working: true
+        -agent: "testing"
+        -comment: "FIX VERIFIED — with device_id propagated via ChatRequest into /api/chat and /api/chat/stream, pin+rename now works end-to-end. Re-ran tests with device_id='fix-verify-1': (6) PATCH /api/conversations/{cid}?device_id=fix-verify-1 body {pinned:true, title:'Important'} → 200, response confirmed pinned=true and title='Important'; (7) GET /api/conversations?device_id=fix-verify-1 → 200, pinned cid appears first with title 'Important' and pinned=true (pinned-sort ordering works); regression POST /api/chat/stream with device_id in body → 200 text/event-stream, 78 delta chunks, final done=true event with conversation_id, and that conversation subsequently appears in GET /api/conversations?device_id=fix-verify-1. All 11/11 focused tests pass. No further issues."
 
 metadata:
   created_by: "testing"
@@ -221,9 +227,7 @@ metadata:
   run_ui: false
 
 test_plan:
-  current_focus:
-    - "Project-Conversation linking PATCH /api/conversations/{id} project_id + GET /api/projects/{pid}/conversations"
-    - "Pin + Rename conversations PATCH /api/conversations/{id}"
+  current_focus: []
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -231,6 +235,9 @@ test_plan:
 agent_communication:
     -agent: "testing"
     -message: "Streaming endpoint /api/chat/stream is fully functional. All 5 scoped tests pass: basic SSE stream, multi-turn context preservation, MongoDB message persistence, non-stream regression, and quick/chat mode length differentiation. No errors, no parse failures. Ready to ship."
+    -agent: "testing"
+    -message: "Fix verification complete — 11/11 PASS against https://africa-laila-hub.preview.emergentagent.com/api with device_id='fix-verify-1'. (1) POST /api/chat with device_id body → 200, cid captured. (2) GET /api/conversations?device_id=fix-verify-1 lists the cid. (3) POST /api/projects → 200, pid='df2a9b04...', name='Verify', color='#10B981'. (4) PATCH /api/conversations/{cid}?device_id=fix-verify-1 body {project_id: pid} → 200 (was 404), returned conversation.project_id == pid. (5) GET /api/projects/{pid}/conversations?device_id=fix-verify-1 → 200, list contains cid. (6) PATCH {pinned:true, title:'Important'} → 200, pinned=true, title='Important'. (7) GET /api/conversations?device_id=fix-verify-1 → cid appears FIRST with title='Important' and pinned=true (pinned-sort ordering works). (8) PATCH {project_id:''} → 200, project_id becomes None. (9) DELETE /api/projects/{pid} → 200 {ok:true}. Regression: (R1) POST /api/chat/stream with device_id in body → 200 text/event-stream (78 delta chunks, final done event). (R2) Stream conversation appears in GET /api/conversations?device_id=fix-verify-1. GREEN — both previously failing tasks are now working. No remaining backend issues."
+
     -agent: "testing"
     -message: "Voice-expansion + TTS speed regression complete — 11/11 checks passed against https://africa-laila-hub.preview.emergentagent.com/api. GET /api/voices returns the 6 expected voices; POST /api/tts baseline nova / onyx 1.15 / echo 1.1 all return valid base64 mp3; invalid voice gracefully returns 500 with detail; speed clamped to [0.5, 2.0]. SSE chat stream + non-stream /api/chat + GET /api/conversations regression all green."
     -agent: "testing"

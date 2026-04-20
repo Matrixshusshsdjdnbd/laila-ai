@@ -13,6 +13,7 @@ import * as MediaLibrary from 'expo-media-library';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import * as Clipboard from 'expo-clipboard';
+import { getDeviceId } from '../src/deviceId';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 
@@ -227,10 +228,12 @@ export default function ChatScreen() {
         };
 
         xhr.onerror = () => reject(new Error('Network error'));
+        const deviceId = await getDeviceId();
         xhr.send(JSON.stringify({
           message: msg,
           conversation_id: conversationId,
           mode: chatMode || mode,
+          device_id: deviceId,
         }));
       });
     } catch (err) {

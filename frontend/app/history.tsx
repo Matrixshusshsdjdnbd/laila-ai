@@ -5,9 +5,11 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
+import { getDeviceId } from '../src/deviceId';
 
 const BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
-const DEVICE_ID = 'device-' + Math.random().toString(36).substring(2, 10);
+let DEVICE_ID = 'device-pending';
+getDeviceId().then(id => { DEVICE_ID = id; });
 
 const COLORS = {
   bg: '#0A0908',
