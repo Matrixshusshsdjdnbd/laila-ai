@@ -25,9 +25,12 @@
     "production": {
       "channel": "production",
       "android": {
-        "buildType": "app-bundle"
+        "buildType": "app-bundle",
+        "resourceClass": "large"
       },
-      "autoIncrement": true,
+      "cache": {
+        "disabled": false
+      },
       "env": {
         "EXPO_PUBLIC_BACKEND_URL": "https://africa-laila-hub.preview.emergentagent.com"
       }
