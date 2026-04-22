@@ -164,6 +164,7 @@ export default function ChatScreen() {
 
     // ─── Real-time streaming via XMLHttpRequest (reliable on RN) ────
     try {
+      const deviceId = await getDeviceId();
       await new Promise<void>((resolve, reject) => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', `${BACKEND_URL}/api/chat/stream`);
@@ -228,7 +229,6 @@ export default function ChatScreen() {
         };
 
         xhr.onerror = () => reject(new Error('Network error'));
-        const deviceId = await getDeviceId();
         xhr.send(JSON.stringify({
           message: msg,
           conversation_id: conversationId,
